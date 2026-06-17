@@ -944,8 +944,7 @@
          */
         function fixContainerSize() {
             var minHeight,
-                odfdoc = sizer.firstChild,
-                zoomLevel = zoomHelper.getZoomLevel();
+                odfdoc = sizer.firstChild;
 
             if (!odfdoc) {
                 return;
@@ -968,8 +967,13 @@
                 }
             }
 
-            element.style.width = Math.round(zoomLevel * sizer.offsetWidth) + "px";
-            element.style.height = Math.round(zoomLevel * sizer.offsetHeight) + "px";
+            // The sizer is now scaled with the CSS `zoom` property (see
+            // gui.ZoomHelper), which rescales its layout box, so its offset
+            // dimensions already reflect the zoom. Let the inline-block canvas
+            // element shrink-wrap the floated sizer instead of pinning it to a
+            // transform-scaled size, so the white page box matches exactly.
+            element.style.width = "";
+            element.style.height = "";
             // Re-apply inline-block to canvas element on resizing.
             // Chrome tends to forget this property after a relayout
             element.style.display = "inline-block";

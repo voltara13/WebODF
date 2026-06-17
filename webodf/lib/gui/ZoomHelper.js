@@ -119,19 +119,15 @@
          * @return {undefined}
          */
         function applyCSSTransform(x, y, scale, is3D) {
-            var transformCommand;
-
-            if (is3D) {
-                transformCommand = 'translate3d(' + x + 'px, ' + y + 'px, 0) scale3d(' + scale + ', ' + scale + ', 1)';
-            } else {
-                transformCommand = 'translate(' + x + 'px, ' + y + 'px) scale(' + scale + ')';
-            }
-
-            zoomableElement.style.WebkitTransform = transformCommand;
-            zoomableElement.style.MozTransform = transformCommand;
-            zoomableElement.style.msTransform = transformCommand;
-            zoomableElement.style.OTransform = transformCommand;
-            zoomableElement.style.transform = transformCommand;
+            // Scale the page with the CSS `zoom` property rather than a CSS
+            // transform. A transform promotes the (very tall) page onto a
+            // composited GPU layer, which mobile WebViews rasterise in tiles;
+            // tiles far from the viewport are left unpainted, so the white page
+            // background shows up only in patches and flickers while zooming.
+            // `zoom` rescales the layout box itself, so the page stays a normal
+            // painted element (like the RTF preview) with a solid background.
+            // Panning (x/y) is handled by native scrolling, so it is ignored.
+            zoomableElement.style.zoom = scale;
         }
 
         /**
