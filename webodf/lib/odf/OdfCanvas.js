@@ -405,6 +405,144 @@
         }
     }
     /**
+     * Find a <style:style> of the drawing-page family by name, searching both
+     * the document's automatic styles and the common styles.
+     * @param {!Element} rootElement  the ODF root element
+     * @param {?string} name
+     * @return {?Element}
+     */
+    function findDrawingPageStyle(rootElement, name) {
+        var roots = [rootElement.automaticStyles, rootElement.styles],
+            i,
+            node;
+        if (!name) {
+            return null;
+        }
+        for (i = 0; i < roots.length; i += 1) {
+            node = roots[i] && roots[i].firstElementChild;
+            while (node) {
+                if (node.namespaceURI === stylens && node.localName === "style"
+                        && node.getAttributeNS(stylens, "family") === "drawing-page"
+                        && node.getAttributeNS(stylens, "name") === name) {
+                    return /**@type{!Element}*/(node);
+                }
+                node = node.nextElementSibling;
+            }
+        }
+        return null;
+    }
+    /**
+     * Resolve a <draw:fill-image> reference to the href of the image part.
+     * @param {!Element} rootElement  the ODF root element
+     * @param {?string} name  value of draw:fill-image-name
+     * @return {?string}
+     */
+    function findFillImageHref(rootElement, name) {
+        var images,
+            i;
+        if (!name) {
+            return null;
+        }
+        images = domUtils.getElementsByTagNameNS(rootElement.styles, drawns, "fill-image");
+        for (i = 0; i < images.length; i += 1) {
+            if (images[i].getAttributeNS(drawns, "name") === name) {
+                return images[i].getAttributeNS(xlinkns, "href");
+            }
+        }
+        return null;
+    }
+    /**
+     * Load the image part and apply it as the background of every draw:page that
+     * uses the given drawing-page style. Mirrors setImage: the part is loaded
+     * asynchronously and the CSS rule is added once its data URL is available.
+     * The rule reuses the same selector that Style2CSS generates for the
+     * drawing-page style, but lives in the (later) position stylesheet so it wins
+     * over the "background: none" that Style2CSS emits when the page background
+     * is visible.
+     * @param {!odf.OdfContainer} container
+     * @param {!string} styleName
+     * @param {!string} href
+     * @param {?string} repeat  value of style:repeat
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function setPageBackground(container, styleName, href, repeat, stylesheet) {
+        var part;
+        /**
+         * @param {?string} url
+         */
+        function callback(url) {
+            var rule;
+            if (!url) { // if part cannot be loaded, url is null
+                return;
+            }
+            rule = 'draw|page[draw|style-name="' + styleName + '"] {'
+                + "background-image: url(" + url + ");"
+                + "background-repeat: " + (repeat === "repeat" ? "repeat" : "no-repeat") + ";";
+            if (repeat === "stretch") {
+                // ODF "stretch" scales the bitmap to fill the page.
+                rule += "background-size: 100% 100%;";
+            }
+            rule += "}";
+            stylesheet.insertRule(rule, stylesheet.cssRules.length);
+        }
+        try {
+            part = container.getPart(href);
+            part.onchange = function (p) {
+                callback(p.url);
+            };
+            part.load();
+        } catch (/**@type{*}*/e) {
+            runtime.log('slight problem: ' + String(e));
+        }
+    }
+    /**
+     * Render bitmap page fills (draw:fill="bitmap") as draw:page backgrounds.
+     * WebODF otherwise ignores bitmap fills, but presentations are commonly
+     * exported with each slide as a single full-bleed background image, which
+     * would then render blank.
+     * @param {!odf.OdfContainer} container
+     * @param {!Element} odfbody
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function loadPageBackgrounds(container, odfbody, stylesheet) {
+        var rootElement = /**@type{!Element}*/(container.rootElement),
+            pages = domUtils.getElementsByTagNameNS(odfbody, drawns, "page"),
+            seen = {},
+            i;
+        for (i = 0; i < pages.length; i += 1) {
+            (function (styleName) {
+                var style, props = null, href, repeat;
+                if (!styleName || seen.hasOwnProperty(styleName)) {
+                    return;
+                }
+                seen[styleName] = true;
+                // Walk the parent-style chain until a fill is specified.
+                style = findDrawingPageStyle(rootElement, styleName);
+                while (style) {
+                    props = domUtils.getDirectChild(style, stylens, "drawing-page-properties");
+                    if (props && props.getAttributeNS(drawns, "fill")) {
+                        break;
+                    }
+                    props = null;
+                    style = findDrawingPageStyle(rootElement,
+                        style.getAttributeNS(stylens, "parent-style-name"));
+                }
+                if (!props || props.getAttributeNS(drawns, "fill") !== "bitmap") {
+                    return;
+                }
+                href = findFillImageHref(rootElement,
+                    props.getAttributeNS(drawns, "fill-image-name"));
+                if (!href) {
+                    return;
+                }
+                repeat = props.getAttributeNS(stylens, "repeat");
+                setPageBackground(container, styleName, href, repeat, stylesheet);
+            }(pages[i].getAttributeNS(drawns, "style-name")));
+        }
+    }
+    /**
      * @param {!Element} odfbody
      * @return {undefined}
      */
@@ -1045,6 +1183,7 @@
             expandTabElements(odfnode.body);
             loadImages(container, odfnode.body, css);
             loadVideos(container, odfnode.body);
+            loadPageBackgrounds(container, odfnode.body, css);
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
             zoomHelper.setZoomableElement(sizer);
