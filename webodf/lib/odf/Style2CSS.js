@@ -654,7 +654,7 @@ odf.Style2CSS = function Style2CSS() {
      * @return {string}
      */
     function getGraphicProperties(props) {
-        var rule = '', alpha, bgcolor, fill;
+        var rule = '', alpha, bgcolor, fill, vAlign, justify;
 
         rule += applySimpleMapping(props, graphicPropertySimpleMapping);
         alpha = props.getAttributeNS(drawns, 'opacity');
@@ -677,6 +677,24 @@ odf.Style2CSS = function Style2CSS() {
             }
         } else if (fill === "none") {
             rule += "background: none;";
+        }
+
+        // Position the shape's text vertically inside its (fixed-height) box.
+        // WebODF otherwise always renders text at the top, so a bottom- or
+        // middle-aligned title (common in presentation placeholders) sits too
+        // high. Implemented with a flex column whose main-axis alignment maps
+        // from draw:textarea-vertical-align. "top" is the default and is left
+        // alone so non-text frames (images) are unaffected.
+        vAlign = props.getAttributeNS(drawns, 'textarea-vertical-align');
+        if (vAlign === 'middle') {
+            justify = 'center';
+        } else if (vAlign === 'bottom') {
+            justify = 'flex-end';
+        } else if (vAlign === 'justify') {
+            justify = 'space-between';
+        }
+        if (justify) {
+            rule += 'display: flex; flex-direction: column; justify-content: ' + justify + ';';
         }
 
         return rule;
