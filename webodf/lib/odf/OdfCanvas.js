@@ -1173,7 +1173,7 @@
 
         shape.setAttributeNS(webodfhelperns, "shapeid", shapeId);
         stylesheet.insertRule('draw|custom-shape[webodfhelper|shapeid="' + shapeId + '"] {'
-            + "background-image: url('data:image/svg+xml;utf8," + encodeURIComponent(svg) + "');"
+            + "background-image: url(\"data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg) + "\");"
             + "background-repeat: no-repeat;"
             + "background-size: 100% 100%;"
             + "background-color: transparent;"
