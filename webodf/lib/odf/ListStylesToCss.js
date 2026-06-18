@@ -53,6 +53,30 @@
             'A': 'upper-latin',
             'i': 'lower-roman',
             'I': 'upper-roman'
+        },
+        /**@const
+           @type{!RegExp}*/
+        // Symbol/dingbat fonts whose glyphs are encoded as plain ASCII letters.
+        // They are proprietary and cannot be bundled, so on a device without
+        // them the bullet shows up as a stray letter (e.g. Wingdings "n" => a
+        // black square renders as the literal "n").
+        symbolFontRe = /wingding|webding|stardings|starsymbol|opensymbol|monotype sorts|zapf\s*dingbats|dingbats/i,
+        /**@const
+           @type{!Object.<string,string>}*/
+        // The handful of dingbat code points commonly used as list bullets,
+        // mapped to Unicode look-alikes that render in any normal font.
+        symbolBulletMap = {
+            "n": "■", // black square (Wingdings)
+            "o": "□", // white square
+            "p": "❑", // shadowed square
+            "l": "●", // black circle
+            "m": "○", // white circle
+            "u": "◆", // black diamond
+            "v": "❖", // black diamond minus white X
+            "§": "▪", // small black square
+            "ü": "✓", // check mark
+            "û": "☐", // ballot box
+            "Ø": "➔"  // heavy wide-headed rightwards arrow
         };
 
     /**
@@ -445,7 +469,26 @@
          * @return {!string}
          */
         function getBulletRule(node) {
-            var bulletChar = node.getAttributeNS(textns, "bullet-char");
+            var bulletChar = node.getAttributeNS(textns, "bullet-char"),
+                textProperties = node.getElementsByTagNameNS(stylens, "text-properties")[0],
+                fontName = textProperties
+                    && (textProperties.getAttributeNS(fons, "font-family")
+                        || textProperties.getAttributeNS(stylens, "font-name")),
+                rule;
+            if (fontName && symbolFontRe.test(fontName)) {
+                // Remap a known dingbat glyph, fall back to a plain disc for the
+                // rest, and render it in a normal font instead of the missing
+                // symbol font.
+                if (symbolBulletMap.hasOwnProperty(bulletChar)) {
+                    bulletChar = symbolBulletMap[bulletChar];
+                } else if (bulletChar && bulletChar.charCodeAt(0) < 0x2000) {
+                    // A glyph code (ASCII/Latin-1) with no mapping: use a disc.
+                    bulletChar = "•";
+                }
+                rule = 'content: "' + escapeCSSString(bulletChar) + '"';
+                rule += '; font-family: sans-serif';
+                return rule;
+            }
             return 'content: "' + escapeCSSString(bulletChar) + '"';
         }
 
