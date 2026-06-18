@@ -543,6 +543,475 @@
         }
     }
     /**
+     * Build an evaluation context for the formulas (draw:equation) and modifiers
+     * (draw:modifiers) of a draw:enhanced-geometry, exposing a resolver for the
+     * predefined identifiers, the modifiers ($N) and the named equations (?fN).
+     * @param {!Element} geometry  <draw:enhanced-geometry>
+     * @return {!{evaluate:function(!string):!number,viewBox:!Array.<!number>}}
+     */
+    function createShapeContext(geometry) {
+        var viewBoxAttr = (geometry.getAttributeNS(svgns, "viewBox") || "0 0 21600 21600").trim().split(/\s+/),
+            vb = [parseFloat(viewBoxAttr[0]) || 0, parseFloat(viewBoxAttr[1]) || 0,
+                parseFloat(viewBoxAttr[2]) || 21600, parseFloat(viewBoxAttr[3]) || 21600],
+            modifiersAttr = (geometry.getAttributeNS(drawns, "modifiers") || "").trim(),
+            modifiers = modifiersAttr ? modifiersAttr.split(/\s+/).map(parseFloat) : [],
+            equations = {},
+            memo = {},
+            inProgress = {},
+            identifiers = {
+                width: vb[2], height: vb[3], left: vb[0], top: vb[1],
+                right: vb[0] + vb[2], bottom: vb[1] + vb[3],
+                logwidth: vb[2], logheight: vb[3],
+                xstretch: 0, ystretch: 0, hasstroke: 1, hasfill: 1, pi: Math.PI
+            },
+            node = geometry.firstElementChild,
+            ctx = {};
+
+        while (node) {
+            if (node.namespaceURI === drawns && node.localName === "equation") {
+                equations[node.getAttributeNS(drawns, "name")] = node.getAttributeNS(drawns, "formula") || "0";
+            }
+            node = node.nextElementSibling;
+        }
+
+        /**
+         * @param {!Array.<!string>} tokens
+         * @return {!number}
+         */
+        function parseExpression(tokens) {
+            var pos = 0;
+
+            function peek() { return tokens[pos]; }
+            function next() { pos += 1; return tokens[pos - 1]; }
+
+            function parsePrimary() {
+                var token = next(), value, args, name;
+                if (token === "(") {
+                    value = parseAddition();
+                    next(); // ")"
+                    return value;
+                }
+                if (token === "-") {
+                    return -parsePrimary();
+                }
+                if (token === "+") {
+                    return parsePrimary();
+                }
+                // function call: identifier followed by "("
+                if (/^[a-z]+$/.test(token) && peek() === "(") {
+                    name = token;
+                    next(); // "("
+                    args = [parseAddition()];
+                    while (peek() === ",") {
+                        next();
+                        args.push(parseAddition());
+                    }
+                    next(); // ")"
+                    switch (name) {
+                    case "abs": return Math.abs(args[0]);
+                    case "sqrt": return Math.sqrt(args[0]);
+                    case "sin": return Math.sin(args[0]);
+                    case "cos": return Math.cos(args[0]);
+                    case "tan": return Math.tan(args[0]);
+                    case "atan": return Math.atan(args[0]);
+                    case "atan2": return Math.atan2(args[0], args[1]);
+                    case "min": return Math.min(args[0], args[1]);
+                    case "max": return Math.max(args[0], args[1]);
+                    case "mod": return Math.sqrt(args[0] * args[0] + args[1] * args[1] + args[2] * args[2]);
+                    case "if": return args[0] > 0 ? args[1] : args[2];
+                    default: return 0;
+                    }
+                }
+                return resolve(token);
+            }
+
+            function parseMultiplication() {
+                var value = parsePrimary(), op;
+                while (peek() === "*" || peek() === "/") {
+                    op = next();
+                    if (op === "*") {
+                        value *= parsePrimary();
+                    } else {
+                        value /= parsePrimary();
+                    }
+                }
+                return value;
+            }
+
+            function parseAdditionInner() {
+                var value = parseMultiplication(), op;
+                while (peek() === "+" || peek() === "-") {
+                    op = next();
+                    if (op === "+") {
+                        value += parseMultiplication();
+                    } else {
+                        value -= parseMultiplication();
+                    }
+                }
+                return value;
+            }
+
+            // hoisted reference so parsePrimary can recurse into the top rule
+            function parseAddition() { return parseAdditionInner(); }
+
+            return parseAddition();
+        }
+
+        /**
+         * Resolve a single value token to a number.
+         * @param {!string} token
+         * @return {!number}
+         */
+        function resolve(token) {
+            var value;
+            if (token === undefined) {
+                return 0;
+            }
+            if (token.charAt(0) === "?") {
+                return evaluateEquation(token.substr(1));
+            }
+            if (token.charAt(0) === "$") {
+                value = modifiers[parseInt(token.substr(1), 10)];
+                return isNaN(value) ? 0 : value;
+            }
+            if (identifiers.hasOwnProperty(token)) {
+                return identifiers[token];
+            }
+            value = parseFloat(token);
+            return isNaN(value) ? 0 : value;
+        }
+
+        /**
+         * Tokenize a formula/path value expression.
+         * @param {!string} expression
+         * @return {!Array.<!string>}
+         */
+        function tokenize(expression) {
+            var tokens = expression.match(/\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|[0-9]*\.?[0-9]+|[()+\-*/,]/g);
+            return tokens || [];
+        }
+
+        /**
+         * @param {!string} name
+         * @return {!number}
+         */
+        function evaluateEquation(name) {
+            var result;
+            if (memo.hasOwnProperty(name)) {
+                return memo[name];
+            }
+            if (inProgress[name] || !equations.hasOwnProperty(name)) {
+                return 0; // cycle or missing reference
+            }
+            inProgress[name] = true;
+            result = parseExpression(tokenize(equations[name]));
+            inProgress[name] = false;
+            memo[name] = result;
+            return result;
+        }
+
+        ctx.viewBox = vb;
+        ctx.evaluate = function (token) {
+            // A path value is a single token (number, ?fN, $N or identifier).
+            return resolve(token);
+        };
+        return ctx;
+    }
+    /**
+     * Append SVG arc command(s) tracing an elliptical segment to the path data.
+     * Splits arcs of 180 degrees or more so a single SVG arc never has an
+     * ambiguous large-arc/sweep combination, and handles full ellipses.
+     * @param {!Array.<!string>} d  path-data fragments (mutated)
+     * @param {!number} cx
+     * @param {!number} cy
+     * @param {!number} rx
+     * @param {!number} ry
+     * @param {!number} startAngle  radians
+     * @param {!number} endAngle  radians
+     * @param {!boolean} connectWithMove  start a new subpath instead of a line
+     * @return {undefined}
+     */
+    function appendEllipticalArc(d, cx, cy, rx, ry, startAngle, endAngle, connectWithMove) {
+        var TWO_PI = Math.PI * 2,
+            sweep = endAngle - startAngle,
+            steps,
+            i,
+            a0,
+            a1,
+            x0 = cx + rx * Math.cos(startAngle),
+            y0 = cy + ry * Math.sin(startAngle),
+            x1,
+            y1,
+            sweepFlag = sweep >= 0 ? 1 : 0,
+            absSweep = Math.abs(sweep);
+        d.push((connectWithMove ? "M" : "L") + x0.toFixed(2) + " " + y0.toFixed(2));
+        // Break the arc into pieces no larger than (just under) 180 degrees.
+        steps = Math.max(1, Math.ceil(absSweep / (Math.PI - 0.001)));
+        for (i = 1; i <= steps; i += 1) {
+            a0 = startAngle + sweep * (i - 1) / steps;
+            a1 = startAngle + sweep * i / steps;
+            x1 = cx + rx * Math.cos(a1);
+            y1 = cy + ry * Math.sin(a1);
+            d.push("A" + rx.toFixed(2) + " " + ry.toFixed(2) + " 0 0 " + sweepFlag + " "
+                + x1.toFixed(2) + " " + y1.toFixed(2));
+        }
+    }
+    /**
+     * Translate a draw:enhanced-path into one or more SVG sub-paths. Each entry
+     * has its own fill/stroke flags (the path "F"/"S" commands disable fill and
+     * stroke for the sub-paths that follow within the same geometry).
+     * @param {!string} path
+     * @param {!{evaluate:function(!string):!number}} ctx
+     * @return {!Array.<!{d:!string,fill:!boolean,stroke:!boolean}>}
+     */
+    function parseEnhancedPath(path, ctx) {
+        var tokens = path.match(/[A-Za-z]|\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|-?[0-9]*\.?[0-9]+/g) || [],
+            commandRe = /^[MLCZNFSTUABWVXYQ]$/,
+            subPaths = [],
+            d = [],
+            fill = true,
+            stroke = true,
+            curX = 0,
+            curY = 0,
+            pos = 0,
+            command,
+            count = 0;
+
+        function flush() {
+            if (d.length) {
+                subPaths.push({ d: d.join(" "), fill: fill, stroke: stroke });
+            }
+            d = [];
+        }
+        function val() {
+            var t = tokens[pos];
+            pos += 1;
+            return ctx.evaluate(t);
+        }
+        function hasValue() {
+            return pos < tokens.length && !commandRe.test(tokens[pos]);
+        }
+        // Elliptical-quadrant helper (X/Y). Draws a 90-degree arc from the
+        // current point to (tx,ty); axis is whichever of the two the tangent
+        // starts along.
+        function quadrant(tx, ty, startAlongX) {
+            var cx = startAlongX ? curX : tx,
+                cy = startAlongX ? ty : curY,
+                rx = Math.abs(tx - cx),
+                ry = Math.abs(ty - cy),
+                a0 = Math.atan2((curY - cy) / (ry || 1), (curX - cx) / (rx || 1)),
+                a1 = Math.atan2((ty - cy) / (ry || 1), (tx - cx) / (rx || 1)),
+                diff = a1 - a0;
+            // Choose the short way round (a quadrant is always 90 degrees).
+            if (diff > Math.PI) { a1 -= 2 * Math.PI; }
+            if (diff < -Math.PI) { a1 += 2 * Math.PI; }
+            appendEllipticalArc(d, cx, cy, rx, ry, a0, a1, false);
+            curX = tx;
+            curY = ty;
+        }
+        // Arc-to helper (A/W). Ellipse bounding box (x1,y1)-(x2,y2); the segment
+        // runs from the direction of (x3,y3) to that of (x4,y4).
+        function arcTo(x1, y1, x2, y2, x3, y3, x4, y4, clockwise, connectWithMove) {
+            var cx = (x1 + x2) / 2,
+                cy = (y1 + y2) / 2,
+                rx = Math.abs(x2 - x1) / 2,
+                ry = Math.abs(y2 - y1) / 2,
+                a0 = Math.atan2((y3 - cy) / (ry || 1), (x3 - cx) / (rx || 1)),
+                a1 = Math.atan2((y4 - cy) / (ry || 1), (x4 - cx) / (rx || 1));
+            if (clockwise) {
+                while (a1 <= a0) { a1 += 2 * Math.PI; }
+            } else {
+                while (a1 >= a0) { a1 -= 2 * Math.PI; }
+            }
+            appendEllipticalArc(d, cx, cy, rx, ry, a0, a1, connectWithMove);
+            curX = cx + rx * Math.cos(a1);
+            curY = cy + ry * Math.sin(a1);
+        }
+
+        while (pos < tokens.length) {
+            command = tokens[pos];
+            if (!commandRe.test(command)) {
+                break; // malformed
+            }
+            pos += 1;
+            switch (command) {
+            case "M":
+                curX = val(); curY = val();
+                d.push("M" + curX + " " + curY);
+                while (hasValue()) {
+                    curX = val(); curY = val();
+                    d.push("L" + curX + " " + curY);
+                }
+                break;
+            case "L":
+                while (hasValue()) {
+                    curX = val(); curY = val();
+                    d.push("L" + curX + " " + curY);
+                }
+                break;
+            case "C":
+                while (hasValue()) {
+                    d.push("C" + val() + " " + val() + " " + val() + " " + val() + " ");
+                    curX = val(); curY = val();
+                    d[d.length - 1] += curX + " " + curY;
+                }
+                break;
+            case "Q":
+                while (hasValue()) {
+                    d.push("Q" + val() + " " + val() + " ");
+                    curX = val(); curY = val();
+                    d[d.length - 1] += curX + " " + curY;
+                }
+                break;
+            case "X":
+                while (hasValue()) {
+                    quadrant(val(), val(), true);
+                }
+                break;
+            case "Y":
+                while (hasValue()) {
+                    quadrant(val(), val(), false);
+                }
+                break;
+            case "A": // arcto, counter-clockwise, connect with line
+            case "B": // arc, counter-clockwise, connect with move
+                while (hasValue()) {
+                    arcTo(val(), val(), val(), val(), val(), val(), val(), val(), false, command === "B");
+                }
+                break;
+            case "W": // clockwise arcto, connect with line
+            case "V": // clockwise arc, connect with move
+                while (hasValue()) {
+                    arcTo(val(), val(), val(), val(), val(), val(), val(), val(), true, command === "V");
+                }
+                break;
+            case "T": // angle-ellipse-to, connect with line
+            case "U": // angle-ellipse, connect with move
+                while (hasValue()) {
+                    (function () {
+                        var ecx = val(), ecy = val(), erx = val(), ery = val(),
+                            a0 = val() / 65536 * Math.PI / 180,
+                            a1 = val() / 65536 * Math.PI / 180;
+                        appendEllipticalArc(d, ecx, ecy, erx, ery, a0, a1, command === "U");
+                        curX = ecx + erx * Math.cos(a1);
+                        curY = ecy + ery * Math.sin(a1);
+                    }());
+                }
+                break;
+            case "Z":
+                d.push("Z");
+                break;
+            case "N":
+                flush();
+                break;
+            case "F":
+                fill = false;
+                break;
+            case "S":
+                stroke = false;
+                break;
+            default:
+                break;
+            }
+            count += 1;
+            if (count > 100000) {
+                break; // safety
+            }
+        }
+        flush();
+        return subPaths;
+    }
+    /**
+     * Render a draw:custom-shape's enhanced geometry as an inline SVG image set
+     * as the element background, so the actual shape outline (banner, callout,
+     * rounded rectangle, ...) is drawn instead of WebODF's default filled
+     * bounding box. The bounding-box fill/border that Style2CSS applies is
+     * suppressed at the same time.
+     * @param {!Element} shape  <draw:custom-shape>
+     * @param {!Element} geometry  <draw:enhanced-geometry>
+     * @param {!string} shapeId
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function renderCustomShape(shape, geometry, shapeId, stylesheet) {
+        var window = runtime.getWindow(),
+            computed = window && window.getComputedStyle(shape, null),
+            rect = shape.getBoundingClientRect && shape.getBoundingClientRect(),
+            ctx,
+            subPaths,
+            fillColor,
+            strokeColor,
+            strokeWidth,
+            paths = "",
+            svg,
+            i,
+            sp,
+            vb;
+        if (!computed) {
+            return;
+        }
+        fillColor = computed.backgroundColor;
+        if (!fillColor || fillColor === "rgba(0, 0, 0, 0)" || fillColor === "transparent") {
+            fillColor = "none";
+        }
+        strokeColor = computed.borderTopStyle === "none" ? "none" : computed.borderTopColor;
+        // Approximate the stroke width in viewBox units (the SVG is stretched to
+        // the shape box via preserveAspectRatio="none").
+        strokeWidth = 0;
+        if (strokeColor !== "none" && rect && rect.width > 0) {
+            strokeWidth = (parseFloat(computed.borderTopWidth) || 1) / rect.width;
+        }
+
+        ctx = createShapeContext(geometry);
+        vb = ctx.viewBox;
+        subPaths = parseEnhancedPath(geometry.getAttributeNS(drawns, "enhanced-path") || "", ctx);
+        if (!subPaths.length) {
+            return;
+        }
+        for (i = 0; i < subPaths.length; i += 1) {
+            sp = subPaths[i];
+            paths += '<path d="' + sp.d + '" fill="' + (sp.fill ? fillColor : "none") + '"';
+            if (sp.stroke && strokeColor !== "none") {
+                paths += ' stroke="' + strokeColor + '" stroke-width="'
+                    + (strokeWidth * vb[2]).toFixed(2) + '"';
+            }
+            paths += "/>";
+        }
+
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="'
+            + vb.join(" ") + '" preserveAspectRatio="none">' + paths + "</svg>";
+
+        shape.setAttributeNS(webodfhelperns, "shapeid", shapeId);
+        stylesheet.insertRule('draw|custom-shape[webodfhelper|shapeid="' + shapeId + '"] {'
+            + "background-image: url('data:image/svg+xml;utf8," + encodeURIComponent(svg) + "');"
+            + "background-repeat: no-repeat;"
+            + "background-size: 100% 100%;"
+            + "background-color: transparent;"
+            + "border: none;"
+            + "}", stylesheet.cssRules.length);
+    }
+    /**
+     * Render all draw:custom-shape elements that carry an enhanced geometry.
+     * @param {!Element} odfbody
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function loadCustomShapes(odfbody, stylesheet) {
+        var shapes = domUtils.getElementsByTagNameNS(odfbody, drawns, "custom-shape"),
+            i,
+            geometry;
+        for (i = 0; i < shapes.length; i += 1) {
+            geometry = domUtils.getDirectChild(shapes[i], drawns, "enhanced-geometry");
+            if (geometry && geometry.getAttributeNS(drawns, "enhanced-path")) {
+                try {
+                    renderCustomShape(shapes[i], geometry, "shape" + i, stylesheet);
+                } catch (/**@type{*}*/e) {
+                    runtime.log("could not render custom shape: " + String(e));
+                }
+            }
+        }
+    }
+    /**
      * @param {!Element} odfbody
      * @return {undefined}
      */
@@ -1184,6 +1653,7 @@
             loadImages(container, odfnode.body, css);
             loadVideos(container, odfnode.body);
             loadPageBackgrounds(container, odfnode.body, css);
+            loadCustomShapes(odfnode.body, css);
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
             zoomHelper.setZoomableElement(sizer);
