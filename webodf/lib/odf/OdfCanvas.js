@@ -1115,7 +1115,10 @@
             vbH,
             realAspect,
             viewBoxAspect,
-            target;
+            target,
+            mirrorH,
+            mirrorV,
+            mirrorTransform;
         if (!computed) {
             return;
         }
@@ -1166,6 +1169,19 @@
                     + (strokeWidth * vb[2]).toFixed(2) + '"';
             }
             paths += "/>";
+        }
+
+        // draw:mirror-horizontal / -vertical flip the geometry within its box.
+        // Reflect the path coordinates around the viewBox centre; with
+        // preserveAspectRatio="none" this matches a flip of the shape box.
+        mirrorH = geometry.getAttributeNS(drawns, "mirror-horizontal") === "true";
+        mirrorV = geometry.getAttributeNS(drawns, "mirror-vertical") === "true";
+        if (mirrorH || mirrorV) {
+            mirrorTransform = "translate("
+                + (mirrorH ? (2 * vb[0] + vbW) : 0) + " "
+                + (mirrorV ? (2 * vb[1] + vbH) : 0) + ") scale("
+                + (mirrorH ? -1 : 1) + " " + (mirrorV ? -1 : 1) + ")";
+            paths = '<g transform="' + mirrorTransform + '">' + paths + "</g>";
         }
 
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="'
