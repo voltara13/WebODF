@@ -579,8 +579,6 @@
                         props = null,
                         fill,
                         color,
-                        href,
-                        repeat,
                         selector = selectorPrefix + name + '"]';
                     while (style) {
                         props = domUtils.getDirectChild(style, stylens, "drawing-page-properties");
@@ -603,13 +601,11 @@
                         }
                     } else if (fill === "none") {
                         stylesheet.insertRule(selector + " {background: none;}", stylesheet.cssRules.length);
-                    } else if (fill === "bitmap") {
-                        href = findFillImageHref(rootElement, props.getAttributeNS(drawns, "fill-image-name"));
-                        repeat = props.getAttributeNS(stylens, "repeat");
-                        if (href) {
-                            setPageBackgroundForSelector(container, selector, href, repeat, stylesheet);
-                        }
                     }
+                    // Bitmap master fills are intentionally not painted here: the
+                    // slide's own draw:page already carries its fill (see
+                    // loadPageBackgrounds), and painting the master clone's bitmap
+                    // as well makes the two overlap and ghost.
                 }(master.getAttributeNS(stylens, "name"), master.getAttributeNS(drawns, "style-name")));
             }
             master = master.nextElementSibling;
@@ -1846,6 +1842,17 @@
             expandTabElements(odfnode.body);
             loadImages(container, odfnode.body, css);
             loadVideos(container, odfnode.body);
+            // WebODF's default graphic style lists "page" among its tags, so it
+            // leaks a fill/border onto every draw:page. Reset it (low specificity)
+            // so pages are transparent by default and the white canvas sizer
+            // shows through; named page fills and the bitmap rules below have
+            // higher specificity and still win. Without this a master-page clone
+            // shows that stray fill instead of being see-through, and (for decks
+            // whose slides are full-bleed bitmaps) the clone's leftover fill
+            // ghosts against the slide on devices that render the absolutely
+            // positioned clone slightly off the in-flow slide.
+            css.insertRule('draw|page {background-color: transparent; border: 0;}',
+                css.cssRules.length);
             loadPageBackgrounds(container, odfnode.body, css);
             loadMasterPageBackgrounds(container, css);
             loadCustomShapes(odfnode.body, css);
