@@ -784,11 +784,85 @@
         }
 
         ctx.viewBox = vb;
+        // The stretch point keeps a shape's corners a fixed size while only the
+        // straight edges between them grow when the shape's box is not square
+        // (e.g. a rounded-rectangle "pill"). NaN when not specified.
+        ctx.stretchX = parseFloat(geometry.getAttributeNS(drawns, "path-stretchpoint-x"));
+        ctx.stretchY = parseFloat(geometry.getAttributeNS(drawns, "path-stretchpoint-y"));
         ctx.evaluate = function (token) {
             // A path value is a single token (number, ?fN, $N or identifier).
             return resolve(token);
         };
         return ctx;
+    }
+    /**
+     * Map enhanced-path points so that, when the SVG is stretched to a non-square
+     * box, the corners around the stretch point keep their (circular) size and
+     * the straight edges absorb the extra length. Only handles paths built from
+     * straight/quadrant commands (M/L/X/Y); returns null for anything else (arcs,
+     * curves) so the caller falls back to a plain stretch.
+     * @param {!Array.<!string>} tokens
+     * @param {!{evaluate:function(!string):!number}} ctx
+     * @param {!number} stretchPoint  coordinate of the stretch point on the axis
+     * @param {!number} viewBoxSize  the axis length of the viewBox
+     * @param {!number} targetSize  the widened axis length (matches the box aspect)
+     * @param {!boolean} horizontal  stretch the x axis (else the y axis)
+     * @return {?Array.<!{x:!number,y:!number}>}
+     */
+    function stretchedPoints(tokens, ctx, stretchPoint, viewBoxSize, targetSize, horizontal) {
+        var commandRe = /^[MLCZNFSTUABWVXYQ]$/,
+            allowed = {M: 1, L: 1, X: 1, Y: 1, Z: 1, N: 1, F: 1, S: 1},
+            raw = [],
+            pos = 0,
+            n,
+            i,
+            cur = null,
+            prevOnPoint = false,
+            offset = targetSize - viewBoxSize,
+            cmd,
+            coord;
+        while (pos < tokens.length) {
+            cmd = tokens[pos];
+            if (!commandRe.test(cmd)) { pos += 1; continue; }
+            if (!allowed[cmd]) { return null; }
+            pos += 1;
+            while (pos < tokens.length && !commandRe.test(tokens[pos])) {
+                raw.push({ x: ctx.evaluate(tokens[pos]), y: ctx.evaluate(tokens[pos + 1]) });
+                pos += 2;
+            }
+        }
+        n = raw.length;
+        // Decide which side of the stretch point each coordinate belongs to. A
+        // point exactly on the stretch point inherits the running side, except a
+        // run of two consecutive on-point coordinates is the zero-length segment
+        // that becomes the stretched straight edge, so the side flips there.
+        for (i = 0; i < n; i += 1) {
+            coord = horizontal ? raw[i].x : raw[i].y;
+            if (coord < stretchPoint - 0.5) {
+                cur = "L";
+                prevOnPoint = false;
+            } else if (coord > stretchPoint + 0.5) {
+                cur = "R";
+                prevOnPoint = false;
+            } else {
+                if (cur === null) {
+                    // First point: take the side of the next off-point coordinate.
+                    cur = "L";
+                    for (var j = i + 1; j < n; j += 1) {
+                        var c = horizontal ? raw[j].x : raw[j].y;
+                        if (c < stretchPoint - 0.5) { cur = "L"; break; }
+                        if (c > stretchPoint + 0.5) { cur = "R"; break; }
+                    }
+                } else if (prevOnPoint) {
+                    cur = cur === "L" ? "R" : "L";
+                }
+                prevOnPoint = true;
+            }
+            if (cur === "R") {
+                if (horizontal) { raw[i].x += offset; } else { raw[i].y += offset; }
+            }
+        }
+        return raw;
     }
     /**
      * Append SVG arc command(s) tracing an elliptical segment to the path data.
@@ -835,9 +909,11 @@
      * stroke for the sub-paths that follow within the same geometry).
      * @param {!string} path
      * @param {!{evaluate:function(!string):!number}} ctx
+     * @param {?Array.<!{x:!number,y:!number}>=} mappedPts  pre-computed,
+     *     stretch-corrected points consumed in order for M/L/X/Y commands
      * @return {!Array.<!{d:!string,fill:!boolean,stroke:!boolean}>}
      */
-    function parseEnhancedPath(path, ctx) {
+    function parseEnhancedPath(path, ctx, mappedPts) {
         var tokens = path.match(/[A-Za-z]|\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|-?[0-9]*\.?[0-9]+/g) || [],
             commandRe = /^[MLCZNFSTUABWVXYQ]$/,
             subPaths = [],
@@ -847,6 +923,7 @@
             curX = 0,
             curY = 0,
             pos = 0,
+            ptIdx = 0,
             command,
             count = 0;
 
@@ -863,6 +940,18 @@
         }
         function hasValue() {
             return pos < tokens.length && !commandRe.test(tokens[pos]);
+        }
+        // Read one (x,y) point: from the stretch-corrected list when present,
+        // otherwise straight from the token stream.
+        function nextPoint() {
+            var p;
+            if (mappedPts) {
+                p = mappedPts[ptIdx];
+                ptIdx += 1;
+                pos += 2;
+                return [p.x, p.y];
+            }
+            return [val(), val()];
         }
         // Elliptical-quadrant helper (X/Y). Draws a 90-degree arc from the
         // current point to (tx,ty); axis is whichever of the two the tangent
@@ -912,16 +1001,16 @@
             pos += 1;
             switch (command) {
             case "M":
-                curX = val(); curY = val();
+                (function () { var p = nextPoint(); curX = p[0]; curY = p[1]; }());
                 d.push("M" + curX + " " + curY);
                 while (hasValue()) {
-                    curX = val(); curY = val();
+                    (function () { var p = nextPoint(); curX = p[0]; curY = p[1]; }());
                     d.push("L" + curX + " " + curY);
                 }
                 break;
             case "L":
                 while (hasValue()) {
-                    curX = val(); curY = val();
+                    (function () { var p = nextPoint(); curX = p[0]; curY = p[1]; }());
                     d.push("L" + curX + " " + curY);
                 }
                 break;
@@ -941,12 +1030,12 @@
                 break;
             case "X":
                 while (hasValue()) {
-                    quadrant(val(), val(), true);
+                    (function () { var p = nextPoint(); quadrant(p[0], p[1], true); }());
                 }
                 break;
             case "Y":
                 while (hasValue()) {
-                    quadrant(val(), val(), false);
+                    (function () { var p = nextPoint(); quadrant(p[0], p[1], false); }());
                 }
                 break;
             case "A": // arcto, counter-clockwise, connect with line
@@ -1014,6 +1103,9 @@
             computed = window && window.getComputedStyle(shape, null),
             rect = shape.getBoundingClientRect && shape.getBoundingClientRect(),
             ctx,
+            path,
+            tokens,
+            mappedPts = null,
             subPaths,
             fillColor,
             strokeColor,
@@ -1022,7 +1114,12 @@
             svg,
             i,
             sp,
-            vb;
+            vb,
+            vbW,
+            vbH,
+            realAspect,
+            viewBoxAspect,
+            target;
         if (!computed) {
             return;
         }
@@ -1040,10 +1137,31 @@
 
         ctx = createShapeContext(geometry);
         vb = ctx.viewBox;
-        subPaths = parseEnhancedPath(geometry.getAttributeNS(drawns, "enhanced-path") || "", ctx);
+        vbW = vb[2];
+        vbH = vb[3];
+        path = geometry.getAttributeNS(drawns, "enhanced-path") || "";
+        // When the shape's box is not as square as its viewBox, keep the corners
+        // around the stretch point circular by widening (or heightening) the
+        // viewBox and remapping the path points instead of scaling uniformly.
+        if (rect && rect.width > 0 && rect.height > 0) {
+            realAspect = rect.width / rect.height;
+            viewBoxAspect = vbW / vbH;
+            tokens = path.match(/[A-Za-z]|\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|-?[0-9]*\.?[0-9]+/g) || [];
+            if (!isNaN(ctx.stretchX) && realAspect > viewBoxAspect * 1.02) {
+                target = vbH * realAspect;
+                mappedPts = stretchedPoints(tokens, ctx, ctx.stretchX, vbW, target, true);
+                if (mappedPts) { vbW = target; }
+            } else if (!isNaN(ctx.stretchY) && realAspect < viewBoxAspect / 1.02) {
+                target = vbW / realAspect;
+                mappedPts = stretchedPoints(tokens, ctx, ctx.stretchY, vbH, target, false);
+                if (mappedPts) { vbH = target; }
+            }
+        }
+        subPaths = parseEnhancedPath(path, ctx, mappedPts);
         if (!subPaths.length) {
             return;
         }
+        vb = [vb[0], vb[1], vbW, vbH];
         for (i = 0; i < subPaths.length; i += 1) {
             sp = subPaths[i];
             paths += '<path d="' + sp.d + '" fill="' + (sp.fill ? fillColor : "none") + '"';
