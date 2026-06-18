@@ -466,7 +466,7 @@
      * @param {!CSSStyleSheet} stylesheet
      * @return {undefined}
      */
-    function setPageBackground(container, styleName, href, repeat, stylesheet) {
+    function setPageBackgroundForSelector(container, selector, href, repeat, stylesheet) {
         var part;
         /**
          * @param {?string} url
@@ -476,7 +476,7 @@
             if (!url) { // if part cannot be loaded, url is null
                 return;
             }
-            rule = 'draw|page[draw|style-name="' + styleName + '"] {'
+            rule = selector + " {"
                 + "background-image: url(" + url + ");"
                 + "background-repeat: " + (repeat === "repeat" ? "repeat" : "no-repeat") + ";";
             if (repeat === "stretch") {
@@ -495,6 +495,18 @@
         } catch (/**@type{*}*/e) {
             runtime.log('slight problem: ' + String(e));
         }
+    }
+    /**
+     * @param {!odf.OdfContainer} container
+     * @param {!string} styleName
+     * @param {!string} href
+     * @param {?string} repeat  value of style:repeat
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function setPageBackground(container, styleName, href, repeat, stylesheet) {
+        setPageBackgroundForSelector(container,
+            'draw|page[draw|style-name="' + styleName + '"]', href, repeat, stylesheet);
     }
     /**
      * Render bitmap page fills (draw:fill="bitmap") as draw:page backgrounds.
@@ -540,6 +552,67 @@
                 repeat = props.getAttributeNS(stylens, "repeat");
                 setPageBackground(container, styleName, href, repeat, stylesheet);
             }(pages[i].getAttributeNS(drawns, "style-name")));
+        }
+    }
+    /**
+     * Apply each master page's own drawing-page fill to its rendered clone in
+     * #shadowContent. WebODF's default graphic style paints every draw:page with
+     * the template's default shape fill, and the master clones carry no
+     * drawing-page style of their own, so without this the master background
+     * shows that stray fill (e.g. a cyan deck default) instead of the master's
+     * real background (e.g. white). Scoped to #shadowContent so it only affects
+     * the master layer, never the slide page (which must stay transparent so the
+     * master background objects remain visible).
+     * @param {!odf.OdfContainer} container
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function loadMasterPageBackgrounds(container, stylesheet) {
+        var rootElement = /**@type{!Element}*/(container.rootElement),
+            masterStyles = rootElement.masterStyles,
+            master = masterStyles && masterStyles.firstElementChild,
+            selectorPrefix = '#shadowContent draw|page[draw|master-page-name="';
+        while (master) {
+            if (master.namespaceURI === stylens && master.localName === "master-page") {
+                (function (name, drawStyleName) {
+                    var style = findDrawingPageStyle(rootElement, drawStyleName),
+                        props = null,
+                        fill,
+                        color,
+                        href,
+                        repeat,
+                        selector = selectorPrefix + name + '"]';
+                    while (style) {
+                        props = domUtils.getDirectChild(style, stylens, "drawing-page-properties");
+                        if (props && props.getAttributeNS(drawns, "fill")) {
+                            break;
+                        }
+                        props = null;
+                        style = findDrawingPageStyle(rootElement,
+                            style.getAttributeNS(stylens, "parent-style-name"));
+                    }
+                    if (!props) {
+                        return;
+                    }
+                    fill = props.getAttributeNS(drawns, "fill");
+                    if (fill === "solid") {
+                        color = props.getAttributeNS(drawns, "fill-color");
+                        if (color) {
+                            stylesheet.insertRule(selector + " {background-color: " + color
+                                + "; background-image: none;}", stylesheet.cssRules.length);
+                        }
+                    } else if (fill === "none") {
+                        stylesheet.insertRule(selector + " {background: none;}", stylesheet.cssRules.length);
+                    } else if (fill === "bitmap") {
+                        href = findFillImageHref(rootElement, props.getAttributeNS(drawns, "fill-image-name"));
+                        repeat = props.getAttributeNS(stylens, "repeat");
+                        if (href) {
+                            setPageBackgroundForSelector(container, selector, href, repeat, stylesheet);
+                        }
+                    }
+                }(master.getAttributeNS(stylens, "name"), master.getAttributeNS(drawns, "style-name")));
+            }
+            master = master.nextElementSibling;
         }
     }
     /**
@@ -795,10 +868,13 @@
         // current point to (tx,ty); axis is whichever of the two the tangent
         // starts along.
         function quadrant(tx, ty, startAlongX) {
+            // The radii span the rectangle between the current point and the
+            // target; only the centre differs between X (tangent starts
+            // horizontal) and Y (tangent starts vertical).
             var cx = startAlongX ? curX : tx,
                 cy = startAlongX ? ty : curY,
-                rx = Math.abs(tx - cx),
-                ry = Math.abs(ty - cy),
+                rx = Math.abs(tx - curX),
+                ry = Math.abs(ty - curY),
                 a0 = Math.atan2((curY - cy) / (ry || 1), (curX - cx) / (rx || 1)),
                 a1 = Math.atan2((ty - cy) / (ry || 1), (tx - cx) / (rx || 1)),
                 diff = a1 - a0;
@@ -1653,6 +1729,7 @@
             loadImages(container, odfnode.body, css);
             loadVideos(container, odfnode.body);
             loadPageBackgrounds(container, odfnode.body, css);
+            loadMasterPageBackgrounds(container, css);
             loadCustomShapes(odfnode.body, css);
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
