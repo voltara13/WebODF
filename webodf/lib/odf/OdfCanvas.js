@@ -1808,6 +1808,14 @@
             sizer = /**@type{!HTMLDivElement}*/(doc.createElementNS(element.namespaceURI, 'div'));
             sizer.style.display = "inline-block";
             sizer.style.background = "white";
+            // The #shadowContent master-page overlay is position:absolute with
+            // top/left:0, so it must be anchored to the sizer (which carries the
+            // slide flow and the zoom). Without an explicit position the sizer is
+            // static, so the overlay instead resolves against a higher ancestor:
+            // any padding/header the host page puts around the canvas then shifts
+            // every master shape relative to its slide text. Make the sizer the
+            // containing block so the overlay always lines up with the slides.
+            sizer.style.position = "relative";
             // When the window is shrunk such that the
             // canvas container has a horizontal scrollbar,
             // zooming out seems to not make the scrollable
