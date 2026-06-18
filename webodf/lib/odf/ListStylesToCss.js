@@ -487,12 +487,9 @@
                 }
                 rule = 'content: "' + escapeCSSString(bulletChar) + '"';
                 rule += '; font-family: sans-serif';
-                // Symbol-font bullet glyphs (e.g. the Wingdings disc) are drawn
-                // large, nearly filling the label box, and the document's
-                // min-label-width is sized for that. The Unicode look-alike in a
-                // text font is much smaller (a disc is only ~0.6em), so left in
-                // the reserved label box it leaves a wide gap to the text. Scale
-                // it up so it fills the label like the symbol it replaces.
+                // The Unicode look-alike in a text font reads smaller than the
+                // symbol it replaces (its visible disc is well under 1em), so
+                // nudge it up to read as a proper bullet rather than a dot.
                 rule += '; font-size: 1.5em';
                 return rule;
             }
@@ -664,6 +661,20 @@
             listItemRule += 'margin-left: ' + (-leftOffset) + 'px;';
             listItemRule += '}';
             appendRule(styleSheet, listItemRule);
+
+            if (listLevelPositionSpaceMode !== "label-alignment") {
+                // In label-width-and-position mode the list level alone fixes the
+                // indent (leftOffset above, plus the hanging label below). A
+                // presentation paragraph exported from PowerPoint also carries
+                // the same indent as fo:margin-left / fo:text-indent on its own
+                // paragraph style; applying both stacks them and pushes the text
+                // ~twice as far from the bullet. Neutralise the paragraph's own
+                // horizontal indent for list paragraphs so only the list level
+                // counts.
+                listItemRule = selector + ' > text|list-item > :not(text|list)';
+                listItemRule += '{ margin-left: 0; text-indent: 0; }';
+                appendRule(styleSheet, listItemRule);
+            }
 
             // insert the list label before every immediate child of the list-item, except for lists
             listItemRule = selector + ' > text|list-item > :not(text|list):first-child:before';
