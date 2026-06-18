@@ -487,6 +487,13 @@
                 }
                 rule = 'content: "' + escapeCSSString(bulletChar) + '"';
                 rule += '; font-family: sans-serif';
+                // Symbol-font bullet glyphs (e.g. the Wingdings disc) are drawn
+                // large, nearly filling the label box, and the document's
+                // min-label-width is sized for that. The Unicode look-alike in a
+                // text font is much smaller (a disc is only ~0.6em), so left in
+                // the reserved label box it leaves a wide gap to the text. Scale
+                // it up so it fills the label like the symbol it replaces.
+                rule += '; font-size: 1.5em';
                 return rule;
             }
             return 'content: "' + escapeCSSString(bulletChar) + '"';
