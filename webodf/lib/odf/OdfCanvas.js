@@ -169,6 +169,7 @@
         /**@const@type {!string}*/stylens = odf.Namespaces.stylens,
         /**@const@type {!string}*/svgns   = odf.Namespaces.svgns,
         /**@const@type {!string}*/tablens = odf.Namespaces.tablens,
+        /**@const@type {!string}*/chartns = odf.Namespaces.chartns,
         /**@const@type {!string}*/textns  = odf.Namespaces.textns,
         /**@const@type {!string}*/xlinkns = odf.Namespaces.xlinkns,
         /**@const@type {!string}*/presentationns = odf.Namespaces.presentationns,
@@ -1556,6 +1557,333 @@
             }
         }
     }
+
+    // ---- Embedded chart rendering ------------------------------------------
+    // WebODF does not render charts. ODF embeds each chart as a sub-document
+    // (draw:object -> "<dir>/content.xml" with a <chart:chart>) whose data lives
+    // in a local table. We parse that and draw a static SVG (bar/line/pie/ring),
+    // which is enough for a preview.
+
+    /**@const@type{!Array.<!string>}*/
+    var chartPalette = ["#4f81bd", "#c0504d", "#9bbb59", "#8064a2", "#4bacc6",
+        "#f79646", "#5da5da", "#faa43a", "#60bd68", "#f17cb0"];
+
+    /**
+     * @param {!string} s
+     * @return {!string}
+     */
+    function svgEsc(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    /**
+     * Map every chart-family style name to its fill/stroke colour.
+     * @param {!Element} chartRoot
+     * @return {!Object.<string,!{fill:?string,stroke:?string}>}
+     */
+    function collectChartStyleColors(chartRoot) {
+        var styles = domUtils.getElementsByTagNameNS(chartRoot, stylens, "style"),
+            map = {},
+            i,
+            s,
+            name,
+            gp;
+        for (i = 0; i < styles.length; i += 1) {
+            s = styles[i];
+            if (s.getAttributeNS(stylens, "family") !== "chart") {
+                continue;
+            }
+            name = s.getAttributeNS(stylens, "name");
+            gp = domUtils.getElementsByTagNameNS(s, stylens, "graphic-properties")[0];
+            if (name && gp) {
+                map[name] = {
+                    fill: gp.getAttributeNS(drawns, "fill-color") || null,
+                    stroke: gp.getAttributeNS(svgns, "stroke-color") || null
+                };
+            }
+        }
+        return map;
+    }
+
+    /**
+     * Parse a chart sub-document into a simple model.
+     * @param {!Document} doc
+     * @return {?{type:!string,title:!string,categories:!Array.<!string>,
+     *            series:!Array.<!{label:!string,color:!string,
+     *            values:!Array.<!number>,pointColors:!Array.<!string>}>}}
+     */
+    function parseChart(doc) {
+        var root = doc && doc.documentElement,
+            chart = root && domUtils.getElementsByTagNameNS(root, chartns, "chart")[0],
+            plotArea,
+            colors,
+            titleEl,
+            cls,
+            table,
+            headerRows,
+            bodyRows,
+            headerCells,
+            categories = [],
+            series = [],
+            seriesEls,
+            i,
+            j,
+            row,
+            cells,
+            sEl,
+            pts,
+            pointColors,
+            styleName;
+        if (!chart) {
+            return null;
+        }
+        colors = collectChartStyleColors(root);
+        plotArea = domUtils.getElementsByTagNameNS(chart, chartns, "plot-area")[0];
+        titleEl = domUtils.getElementsByTagNameNS(chart, chartns, "title")[0];
+        cls = (chart.getAttributeNS(chartns, "class") || "").replace("chart:", "");
+        table = domUtils.getElementsByTagNameNS(chart, tablens, "table")[0];
+        if (!plotArea || !table) {
+            return null;
+        }
+        /**
+         * @param {!Element} rowEl
+         * @return {!Array.<!Element>}
+         */
+        function cellsOf(rowEl) {
+            return domUtils.getElementsByTagNameNS(rowEl, tablens, "table-cell");
+        }
+        headerRows = domUtils.getElementsByTagNameNS(table, tablens, "table-header-rows")[0];
+        headerCells = headerRows
+            ? cellsOf(domUtils.getElementsByTagNameNS(headerRows, tablens, "table-row")[0])
+            : [];
+        bodyRows = domUtils.getElementsByTagNameNS(
+            domUtils.getElementsByTagNameNS(table, tablens, "table-rows")[0] || table,
+            tablens, "table-row");
+        // categories = first column of the body rows
+        for (i = 0; i < bodyRows.length; i += 1) {
+            cells = cellsOf(bodyRows[i]);
+            categories.push(cells[0] ? (cells[0].textContent || "").trim() : "");
+        }
+        seriesEls = domUtils.getElementsByTagNameNS(plotArea, chartns, "series");
+        for (j = 0; j < seriesEls.length; j += 1) {
+            sEl = seriesEls[j];
+            styleName = sEl.getAttributeNS(chartns, "style-name");
+            // per-point colours (pie/ring give each slice its own style)
+            pointColors = [];
+            pts = domUtils.getElementsByTagNameNS(sEl, chartns, "data-point");
+            for (i = 0; i < pts.length; i += 1) {
+                if (pts[i].getAttributeNS(chartns, "style-name")
+                        && colors[pts[i].getAttributeNS(chartns, "style-name")]) {
+                    pointColors.push(colors[pts[i].getAttributeNS(chartns, "style-name")].fill
+                        || chartPalette[pointColors.length % chartPalette.length]);
+                }
+            }
+            series.push({
+                label: headerCells[j + 1]
+                    ? (headerCells[j + 1].textContent || "").trim()
+                    : ("Series " + (j + 1)),
+                color: (colors[styleName] && (colors[styleName].fill || colors[styleName].stroke))
+                    || chartPalette[j % chartPalette.length],
+                values: (function () {
+                    var vals = [], k, c;
+                    for (k = 0; k < bodyRows.length; k += 1) {
+                        c = cellsOf(bodyRows[k])[j + 1];
+                        vals.push(c ? parseFloat(c.getAttributeNS(officens, "value")) || 0 : 0);
+                    }
+                    return vals;
+                }()),
+                pointColors: pointColors
+            });
+        }
+        return { type: cls, title: titleEl ? (titleEl.textContent || "").trim() : "",
+            categories: categories, series: series };
+    }
+
+    /**
+     * A "nice" axis maximum and step for a value range 0..maxVal.
+     * @param {!number} maxVal
+     * @return {!{max:!number,step:!number}}
+     */
+    function niceAxis(maxVal) {
+        var target = (maxVal <= 0 ? 1 : maxVal) * 1.05,
+            rough = target / 5,
+            pow = Math.pow(10, Math.floor(Math.log(rough) / Math.LN10)),
+            n = rough / pow,
+            step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * pow;
+        return { max: Math.ceil(target / step) * step, step: step };
+    }
+
+    /**
+     * Render the parsed chart model to an SVG string at the given cm size.
+     * @param {!Object} c  parsed chart model
+     * @param {!number} wcm
+     * @param {!number} hcm
+     * @return {!string}
+     */
+    function buildChartSvg(c, wcm, hcm) {
+        var W = Math.max(120, Math.round(wcm * 40)),
+            H = Math.max(90, Math.round(hcm * 40)),
+            body = "",
+            legendW = 0;
+        /**
+         * @param {!number} x @param {!number} y @param {!string} t
+         * @param {!string} anchor @param {!number} size @param {string=} weight
+         * @return {!string}
+         */
+        function text(x, y, t, anchor, size, weight) {
+            return '<text x="' + x + '" y="' + y + '" text-anchor="' + anchor
+                + '" font-family="Arial,sans-serif" font-size="' + size + '"'
+                + (weight ? ' font-weight="' + weight + '"' : '')
+                + ' fill="#404040">' + svgEsc(t) + '</text>';
+        }
+        /**
+         * Legend at the right; returns its width and appends to body.
+         * @param {!Array.<!{label:!string,color:!string}>} items
+         * @return {undefined}
+         */
+        function drawLegend(items, top) {
+            var maxLen = 0, k, ly;
+            for (k = 0; k < items.length; k += 1) {
+                maxLen = Math.max(maxLen, items[k].label.length);
+            }
+            legendW = 22 + maxLen * 6.2;
+            for (k = 0; k < items.length; k += 1) {
+                ly = top + k * 18;
+                body += '<rect x="' + (W - legendW) + '" y="' + ly
+                    + '" width="11" height="11" fill="' + items[k].color + '"/>';
+                body += text(W - legendW + 16, ly + 10, items[k].label, "start", 11);
+            }
+        }
+
+        if (c.title) {
+            body += text(W / 2, 18, c.title, "middle", 14, "bold");
+        }
+
+        if (c.type === "circle" || c.type === "ring") {
+            // pie / doughnut: one series, slice per category
+            (function () {
+                var vals = c.series[0] ? c.series[0].values : [],
+                    pcols = c.series[0] ? c.series[0].pointColors : [],
+                    total = 0, k, ang0 = -Math.PI / 2, ang1, frac,
+                    cx, cy, r, rIn, mid, lx, ly, x0, y0, x1, y1, large, col;
+                for (k = 0; k < vals.length; k += 1) { total += vals[k]; }
+                drawLegend((function () {
+                    var it = [], m;
+                    for (m = 0; m < c.categories.length; m += 1) {
+                        it.push({ label: c.categories[m],
+                            color: pcols[m] || chartPalette[m % chartPalette.length] });
+                    }
+                    return it;
+                }()), 30);
+                r = Math.min((W - legendW - 20) / 2, (H - 36) / 2) - 4;
+                cx = (W - legendW) / 2;
+                cy = 28 + (H - 28) / 2;
+                rIn = c.type === "ring" ? r * 0.55 : 0;
+                if (total <= 0) { return; }
+                for (k = 0; k < vals.length; k += 1) {
+                    frac = vals[k] / total;
+                    ang1 = ang0 + frac * 2 * Math.PI;
+                    x0 = cx + r * Math.cos(ang0); y0 = cy + r * Math.sin(ang0);
+                    x1 = cx + r * Math.cos(ang1); y1 = cy + r * Math.sin(ang1);
+                    large = (ang1 - ang0) > Math.PI ? 1 : 0;
+                    col = pcols[k] || chartPalette[k % chartPalette.length];
+                    if (rIn > 0) {
+                        body += '<path d="M' + (cx + rIn * Math.cos(ang0)) + ' '
+                            + (cy + rIn * Math.sin(ang0)) + ' L' + x0 + ' ' + y0
+                            + ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + x1 + ' ' + y1
+                            + ' L' + (cx + rIn * Math.cos(ang1)) + ' ' + (cy + rIn * Math.sin(ang1))
+                            + ' A' + rIn + ' ' + rIn + ' 0 ' + large + ' 0 '
+                            + (cx + rIn * Math.cos(ang0)) + ' ' + (cy + rIn * Math.sin(ang0))
+                            + ' Z" fill="' + col + '" stroke="#ffffff" stroke-width="1.5"/>';
+                    } else {
+                        body += '<path d="M' + cx + ' ' + cy + ' L' + x0 + ' ' + y0
+                            + ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + x1 + ' ' + y1
+                            + ' Z" fill="' + col + '" stroke="#ffffff" stroke-width="1.5"/>';
+                    }
+                    mid = (ang0 + ang1) / 2;
+                    lx = cx + (rIn > 0 ? (r + rIn) / 2 : r * 0.6) * Math.cos(mid);
+                    ly = cy + (rIn > 0 ? (r + rIn) / 2 : r * 0.6) * Math.sin(mid);
+                    body += text(lx, ly + 4, String(vals[k]), "middle", 11);
+                    ang0 = ang1;
+                }
+            }());
+        } else {
+            // bar / line: shared cartesian axes
+            (function () {
+                var ml = 30, mr, mt = c.title ? 26 : 10, mb = 20,
+                    maxVal = 0, k, s, axis, plotW, plotH, x0, y0,
+                    nCat = c.categories.length, gi, catW, t, gx, gy,
+                    nSer = c.series.length, bw, bx, vh, px, py, pts, legendItems = [];
+                for (s = 0; s < c.series.length; s += 1) {
+                    for (k = 0; k < c.series[s].values.length; k += 1) {
+                        maxVal = Math.max(maxVal, c.series[s].values[k]);
+                    }
+                    legendItems.push({ label: c.series[s].label, color: c.series[s].color });
+                }
+                drawLegend(legendItems, mt + 4);
+                mr = legendW + 6;
+                axis = niceAxis(maxVal);
+                plotW = W - ml - mr;
+                plotH = H - mt - mb;
+                x0 = ml;
+                y0 = mt + plotH;
+                // y gridlines + labels
+                for (t = 0; t <= axis.max + 1e-9; t += axis.step) {
+                    gy = y0 - (t / axis.max) * plotH;
+                    body += '<line x1="' + x0 + '" y1="' + gy + '" x2="' + (x0 + plotW)
+                        + '" y2="' + gy + '" stroke="#cccccc" stroke-width="1"/>';
+                    body += text(x0 - 4, gy + 4,
+                        String(Math.round(t * 100) / 100), "end", 10);
+                }
+                // axis lines
+                body += '<line x1="' + x0 + '" y1="' + mt + '" x2="' + x0 + '" y2="'
+                    + y0 + '" stroke="#888888" stroke-width="1"/>';
+                catW = plotW / (nCat || 1);
+                // category labels
+                for (gi = 0; gi < nCat; gi += 1) {
+                    gx = x0 + catW * (gi + 0.5);
+                    body += text(gx, y0 + 14, c.categories[gi], "middle", 10);
+                }
+                if (c.type === "line") {
+                    for (s = 0; s < nSer; s += 1) {
+                        pts = "";
+                        for (k = 0; k < c.series[s].values.length; k += 1) {
+                            px = x0 + catW * (k + 0.5);
+                            py = y0 - (c.series[s].values[k] / axis.max) * plotH;
+                            pts += (k ? " " : "") + px + "," + py;
+                        }
+                        body += '<polyline points="' + pts + '" fill="none" stroke="'
+                            + c.series[s].color + '" stroke-width="2"/>';
+                        for (k = 0; k < c.series[s].values.length; k += 1) {
+                            px = x0 + catW * (k + 0.5);
+                            py = y0 - (c.series[s].values[k] / axis.max) * plotH;
+                            body += '<circle cx="' + px + '" cy="' + py + '" r="3" fill="'
+                                + c.series[s].color + '"/>';
+                        }
+                    }
+                } else {
+                    // grouped bars
+                    bw = (catW * 0.7) / (nSer || 1);
+                    for (gi = 0; gi < nCat; gi += 1) {
+                        for (s = 0; s < nSer; s += 1) {
+                            vh = (c.series[s].values[gi] / axis.max) * plotH;
+                            bx = x0 + catW * gi + catW * 0.15 + s * bw;
+                            body += '<rect x="' + bx + '" y="' + (y0 - vh) + '" width="'
+                                + (bw * 0.92) + '" height="' + vh + '" fill="'
+                                + c.series[s].color + '"/>';
+                            body += text(bx + bw * 0.46, y0 - vh - 3,
+                                String(Math.round(c.series[s].values[gi])), "middle", 10);
+                        }
+                    }
+                }
+            }());
+        }
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H
+            + '" preserveAspectRatio="xMidYMid meet">'
+            + '<rect width="' + W + '" height="' + H + '" fill="#ffffff"/>'
+            + body + '</svg>';
+    }
     /**
      * Parse an ODF length ("7.112cm", "-3pt") into value + unit.
      * @param {?string} value
@@ -2211,6 +2539,63 @@
             }
         }
         /**
+         * Render embedded chart objects (draw:object -> chart sub-document) as
+         * static SVG backgrounds on the object element.
+         * @param {!odf.OdfContainer} container
+         * @param {!Element} odffragment
+         * @param {!CSSStyleSheet} stylesheet
+         * @return {undefined}
+         */
+        function loadCharts(container, odffragment, stylesheet) {
+            var objects = odffragment.getElementsByTagNameNS(drawns, 'object'),
+                i;
+            /**
+             * @param {!Element} object
+             * @param {!string} chartId
+             * @return {undefined}
+             */
+            function loadChart(object, chartId) {
+                var href = object.getAttributeNS(xlinkns, 'href'),
+                    path,
+                    frame = object.parentNode;
+                if (!href) {
+                    return;
+                }
+                path = href.replace(/^\.?\//, "").replace(/\/$/, "") + "/content.xml";
+                container.getPartData(path, function (err, data) {
+                    var doc, model, svg, w, h, rule;
+                    if (err || !data) {
+                        return;
+                    }
+                    try {
+                        doc = runtime.parseXML(runtime.byteArrayToString(data, "utf8"));
+                        model = parseChart(doc);
+                        if (!model || !model.series.length) {
+                            return;
+                        }
+                        w = parseLength(frame.getAttributeNS(svgns, "width"));
+                        h = parseLength(frame.getAttributeNS(svgns, "height"));
+                        svg = buildChartSvg(model, w.v || 12, h.v || 7);
+                        object.setAttributeNS(webodfhelperns, "chartid", chartId);
+                        rule = 'draw|object[webodfhelper|chartid="' + chartId + '"] {'
+                            + 'display: block; width: 100%; height: 100%;'
+                            + 'background-image: url("data:image/svg+xml;charset=utf-8,'
+                            + encodeURIComponent(svg) + '");'
+                            + 'background-repeat: no-repeat;'
+                            + 'background-position: center;'
+                            + 'background-size: 100% 100%;'
+                            + '}';
+                        stylesheet.insertRule(rule, stylesheet.cssRules.length);
+                    } catch (/**@type{*}*/e) {
+                        runtime.log("could not render chart: " + String(e));
+                    }
+                });
+            }
+            for (i = 0; i < objects.length; i += 1) {
+                loadChart(/**@type{!Element}*/(objects.item(i)), 'chart' + String(i));
+            }
+        }
+        /**
          * Load all the video that are inside an odf element.
          * @param {!odf.OdfContainer} container
          * @param {!Element} odffragment
@@ -2506,6 +2891,7 @@
             expandSpaceElements(odfnode.body);
             expandTabElements(odfnode.body);
             loadImages(container, odfnode.body, css);
+            loadCharts(container, odfnode.body, css);
             loadVideos(container, odfnode.body);
             // WebODF's default graphic style lists "page" among its tags, so it
             // leaks a fill/border onto every draw:page. Reset it (low specificity)
