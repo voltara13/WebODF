@@ -2631,8 +2631,66 @@
             walkRows(table);
         }
 
+        /**
+         * @param {!Element} node
+         * @return {!boolean}  true if node is inside an office:spreadsheet
+         */
+        function isInSpreadsheet(node) {
+            var n = node.parentNode;
+            while (n) {
+                if (n.namespaceURI === officens && n.localName === "spreadsheet") {
+                    return true;
+                }
+                n = n.parentNode;
+            }
+            return false;
+        }
+
+        /**
+         * A spreadsheet collapses a run of trailing empty columns into a single
+         * cell carrying table:number-columns-repeated, which WebODF renders as
+         * one cell. A fully empty row then ends up just one cell wide, so any
+         * per-cell painting (e.g. the gridline background) stops after the first
+         * column. Pad every row out to the table's column count with empty cells
+         * so the grid fills the whole used range. Spreadsheet-only: other tables
+         * are already rectangular (and do not nest here, so the column/row
+         * descendant scan stays within this table).
+         * @param {!Element} table
+         * @return {undefined}
+         */
+        function padRowsToColumnCount(table) {
+            var doc = table.ownerDocument,
+                ncols = domUtils.getElementsByTagNameNS(table, tablens, 'table-column').length,
+                rows,
+                i,
+                count,
+                c;
+            if (!ncols) {
+                return;
+            }
+            rows = domUtils.getElementsByTagNameNS(table, tablens, 'table-row');
+            for (i = 0; i < rows.length; i += 1) {
+                count = 0;
+                c = rows[i].firstElementChild;
+                while (c) {
+                    if (c.namespaceURI === tablens
+                            && (c.localName === "table-cell"
+                                || c.localName === "covered-table-cell")) {
+                        count += 1;
+                    }
+                    c = c.nextElementSibling;
+                }
+                for (; count < ncols; count += 1) {
+                    rows[i].appendChild(doc.createElementNS(tablens, 'table:table-cell'));
+                }
+            }
+        }
+
         domUtils.getElementsByTagNameNS(odffragment, tablens, 'table').forEach(function (table) {
             applyDefaultCellStyles(/**@type{!Element}*/(table));
+            if (isInSpreadsheet(/**@type{!Element}*/(table))) {
+                padRowsToColumnCount(/**@type{!Element}*/(table));
+            }
         });
         tableCells = domUtils.getElementsByTagNameNS(odffragment, tablens, 'table-cell');
         for (i = 0; i < tableCells.length; i += 1) {

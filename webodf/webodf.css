@@ -162,6 +162,10 @@ office|spreadsheet table|table {
      which lets a column collapse to a single glyph. Fixed layout makes the
      column widths authoritative and text wraps within them. */
   table-layout: fixed;
+  /* Close the grid's outer top/left edge (cells only draw their right+bottom
+     hairline), so the first row/column isn't left open. */
+  border-top: 1px solid #d4d4d4;
+  border-left: 1px solid #d4d4d4;
 }
 office|spreadsheet table|table:after {
   /* show sheet name the end of the sheet */
@@ -178,8 +182,17 @@ office|spreadsheet table|table-row:before {
   content: counter(row);
   display: table-cell;
 }
+/* Excel-style minimal gridlines: a right + bottom hairline per cell, drawn as a
+   background (not a border) so it sits behind the cell's real fo:border and
+   never merges with it under border-collapse (which used to produce a
+   patchwork). Painting requires the cell to exist, so OdfCanvas.modifyTables
+   pads every row out to the table's column count — otherwise sparse rows (a
+   trailing repeated empty cell that WebODF renders as a single cell) leave the
+   grid open past column A. */
 office|spreadsheet table|table-cell {
-  border: 1px solid #cccccc;
+  background-image:
+    linear-gradient(to left, #d4d4d4 1px, transparent 1px),
+    linear-gradient(to top, #d4d4d4 1px, transparent 1px);
 }
 table|table {
   display: table;
