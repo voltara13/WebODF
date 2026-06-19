@@ -106,6 +106,16 @@
              * @type{!boolean}
              */
             requiresCustomScrollBars = runtime.getWindow().hasOwnProperty('ontouchstart'),
+            /**
+             * Whether ZoomHelper handles touch gestures itself. When false, no
+             * touch listeners are attached and pinch-zoom/pan is left to the
+             * host (e.g. the native WebView viewport). Programmatic zoom via
+             * setZoomLevel still works. Hosts that embed the canvas in a
+             * natively-scrolling container disable this so two zoom systems do
+             * not fight over the same gestures.
+             * @type{!boolean}
+             */
+            gesturesEnabled = true,
             /**@type{?string}*/
             parentOverflow = "";
 
@@ -451,13 +461,31 @@
         };
 
         /**
+         * Enable or disable ZoomHelper's own touch-gesture handling
+         * (pinch-zoom and pan). When disabled, any attached listeners are
+         * removed and none are re-attached on subsequent setZoomableElement
+         * calls, leaving gestures to the host. Programmatic setZoomLevel is
+         * unaffected.
+         * @param {!boolean} enabled
+         * @return {undefined}
+         */
+        this.setGestureSupportEnabled = function (enabled) {
+            gesturesEnabled = enabled;
+            if (enabled) {
+                registerGestureListeners();
+            } else {
+                unregisterGestureListeners();
+            }
+        };
+
+        /**
          * Adds touchstart, touchmove, and touchend
          * event listeners to the element's scrollable
          * container.
          * @return {undefined}
          */
         function registerGestureListeners() {
-            if (offsetParent) {
+            if (offsetParent && gesturesEnabled) {
                 // There is no reliable way of detecting if the browser
                 // supports these touch events. Therefore the only thing
                 // we can do is simply attach listeners to these events
