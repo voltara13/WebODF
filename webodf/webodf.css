@@ -136,6 +136,10 @@ draw|page {
   display: block;
   position: relative;
   overflow: hidden;
+  /* Space stacked slides apart in the preview (all pages are shown at once).
+     Applied to both the in-flow slides and their #shadowContent master-page
+     clones so the two stacks advance by the same amount and stay aligned. */
+  margin-bottom: 24px;
 }
 presentation|notes, presentation|footer-decl, presentation|date-time-decl {
     display: none;
@@ -155,7 +159,8 @@ office|spreadsheet text|p {
   margin: 0px;
 }
 office|spreadsheet table|table {
-  margin: 3px;
+  /* Extra bottom gap separates one sheet from the next (sheets are stacked). */
+  margin: 3px 3px 24px;
   /* Honour the sheet's declared column widths (style:column-width, mapped onto
      the table-column elements). With the default auto layout the engine ignores
      them and squeezes wide text columns to a sliver — worse with break-all,
