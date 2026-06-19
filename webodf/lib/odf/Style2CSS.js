@@ -55,6 +55,9 @@ odf.Style2CSS = function Style2CSS() {
            @type{!string}*/
         presentationns = odf.Namespaces.presentationns,
         /**@const
+           @type{!string}*/
+        loextns = "urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0",
+        /**@const
          * @type {!string}*/
         webodfhelperns = "urn:webodf:names:helper",
         domUtils = core.DomUtils,
@@ -649,21 +652,162 @@ odf.Style2CSS = function Style2CSS() {
         return !isNaN(parseFloat(n));
     }
 
+    /**
+     * Find a named fill definition (<draw:gradient> or <draw:hatch>) inside the
+     * document's <office:styles> or <office:automatic-styles>. ODF references
+     * these by name from the graphic properties (draw:fill-gradient-name etc.).
+     * @param {!string} localName
+     * @param {?string} name
+     * @return {?Element}
+     */
+    function findFillDef(localName, name) {
+        var roots, i, defs, j;
+        if (!name) {
+            return null;
+        }
+        roots = [odfRoot.styles, odfRoot.automaticStyles];
+        for (i = 0; i < roots.length; i += 1) {
+            if (roots[i]) {
+                defs = domUtils.getElementsByTagNameNS(roots[i], drawns, localName);
+                for (j = 0; j < defs.length; j += 1) {
+                    if (defs[j].getAttributeNS(drawns, 'name') === name) {
+                        return defs[j];
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Parse an ODF angle value to degrees. ODF allows a unit ("30deg",
+     * "1.5rad", "100grad") or a bare number, which is legacy 1/10 of a degree.
+     * @param {?string} value
+     * @return {!number}
+     */
+    function parseOdfAngle(value) {
+        var n;
+        if (!value) {
+            return 0;
+        }
+        value = value.trim();
+        if (/deg$/.test(value)) {
+            return parseFloat(value);
+        }
+        if (/grad$/.test(value)) {
+            return parseFloat(value) * 0.9;
+        }
+        if (/rad$/.test(value)) {
+            return parseFloat(value) * 180 / Math.PI;
+        }
+        n = parseFloat(value);
+        return isNaN(n) ? 0 : n / 10;
+    }
+
+    /**
+     * Produce an rgba() colour from an {r,g,b} triple, scaled by an ODF
+     * intensity percentage (gradients darken towards black at <100%).
+     * @param {!{r:number,g:number,b:number}} rgb
+     * @param {?string} intensity
+     * @param {!number} alpha
+     * @return {!string}
+     */
+    function scaledRgba(rgb, intensity, alpha) {
+        var f = isNumber(intensity) ? parseFloat(intensity) / 100 : 1;
+        return 'rgba(' + Math.round(rgb.r * f) + ',' + Math.round(rgb.g * f)
+            + ',' + Math.round(rgb.b * f) + ',' + alpha + ')';
+    }
+
+    /**
+     * Convert an ODF <draw:gradient> definition to a CSS gradient image.
+     * @param {!Element} grad
+     * @param {!number} alpha
+     * @return {!string}  a CSS <gradient> value, or "" if unrenderable
+     */
+    function gradientToCss(grad, alpha) {
+        var style = grad.getAttributeNS(drawns, 'style') || 'linear',
+            startC = hexToRgb(grad.getAttributeNS(drawns, 'start-color') || ''),
+            endC = hexToRgb(grad.getAttributeNS(drawns, 'end-color') || ''),
+            borderAttr = grad.getAttributeNS(drawns, 'border'),
+            border = isNumber(borderAttr)
+                ? Math.max(0, Math.min(100, parseFloat(borderAttr)))
+                : 0,
+            start,
+            end,
+            cssAngle;
+        if (!startC || !endC) {
+            return '';
+        }
+        start = scaledRgba(startC, grad.getAttributeNS(drawns, 'start-intensity'), alpha);
+        end = scaledRgba(endC, grad.getAttributeNS(drawns, 'end-intensity'), alpha);
+        if (style === 'radial' || style === 'ellipsoid') {
+            return 'radial-gradient(ellipse at center, ' + start + ' '
+                + border + '%, ' + end + ' 100%)';
+        }
+        if (style === 'square' || style === 'rectangular') {
+            return 'radial-gradient(circle at center, ' + start + ' '
+                + border + '%, ' + end + ' 100%)';
+        }
+        // ODF angles run counter-clockwise from the positive x-axis; CSS
+        // gradient angles run clockwise from "to top". (90 - odf) maps between
+        // the two so a vertical ODF gradient stays vertical.
+        cssAngle = ((90 - parseOdfAngle(grad.getAttributeNS(drawns, 'angle'))) % 360 + 360) % 360;
+        if (style === 'axial') {
+            // axial: end colour at both edges, start colour through the centre
+            return 'linear-gradient(' + cssAngle + 'deg, ' + end + ' 0%, '
+                + start + ' 50%, ' + end + ' 100%)';
+        }
+        return 'linear-gradient(' + cssAngle + 'deg, ' + start + ' '
+            + border + '%, ' + end + ' 100%)';
+    }
+
+    /**
+     * Convert an ODF <draw:hatch> definition to a stack of CSS
+     * repeating-linear-gradients (one per hatch direction).
+     * @param {!Element} hatch
+     * @return {!string}
+     */
+    function hatchToCss(hatch) {
+        var hstyle = hatch.getAttributeNS(drawns, 'style') || 'single',
+            color = hatch.getAttributeNS(drawns, 'color') || '#000000',
+            distance = hatch.getAttributeNS(drawns, 'distance') || '0.1cm',
+            rotation = parseOdfAngle(hatch.getAttributeNS(drawns, 'rotation')),
+            layers = [];
+        /**
+         * @param {!number} angle
+         * @return {!string}
+         */
+        function line(angle) {
+            var a = ((-angle) % 360 + 360) % 360;
+            return 'repeating-linear-gradient(' + a + 'deg, ' + color + ' 0, '
+                + color + ' 1px, transparent 1px, transparent ' + distance + ')';
+        }
+        layers.push(line(rotation));
+        if (hstyle === 'double' || hstyle === 'triple') {
+            layers.push(line(rotation + 90));
+        }
+        if (hstyle === 'triple') {
+            layers.push(line(rotation + 45));
+        }
+        return layers.join(', ');
+    }
+
    /**
      * @param {!Element} props
      * @return {string}
      */
     function getGraphicProperties(props) {
-        var rule = '', alpha, bgcolor, fill, vAlign, justify;
+        var rule = '', alpha, bgcolor, fill, vAlign, justify, def, css,
+            shadowColor, shadowAlpha;
 
         rule += applySimpleMapping(props, graphicPropertySimpleMapping);
         alpha = props.getAttributeNS(drawns, 'opacity');
+        alpha = isNumber(alpha) ? parseFloat(alpha) / 100 : 1;
         fill = props.getAttributeNS(drawns, 'fill');
         bgcolor = props.getAttributeNS(drawns, 'fill-color');
 
-        if (fill === 'solid' || fill === 'hatch') {
+        if (fill === 'solid') {
             if (bgcolor && bgcolor !== 'none') {
-                alpha = isNumber(alpha) ? parseFloat(alpha) / 100 : 1;
                 bgcolor = hexToRgb(bgcolor);
                 if (bgcolor) {
                     rule += "background-color: rgba("
@@ -675,8 +819,51 @@ odf.Style2CSS = function Style2CSS() {
             } else {
                 rule += "background: none;";
             }
+        } else if (fill === 'gradient') {
+            def = findFillDef('gradient', props.getAttributeNS(drawns, 'fill-gradient-name'));
+            css = def && gradientToCss(def, alpha);
+            if (css) {
+                rule += "background-image: " + css + ";";
+            }
+        } else if (fill === 'hatch') {
+            def = findFillDef('hatch', props.getAttributeNS(drawns, 'fill-hatch-name'));
+            if (def) {
+                // a solid hatch paints fill-color behind the hatch lines
+                if (props.getAttributeNS(drawns, 'fill-hatch-solid') === 'true'
+                        && bgcolor && bgcolor !== 'none') {
+                    bgcolor = hexToRgb(bgcolor);
+                    if (bgcolor) {
+                        rule += "background-color: rgba(" + bgcolor.r + ","
+                            + bgcolor.g + "," + bgcolor.b + "," + alpha + ");";
+                    }
+                }
+                rule += "background-image: " + hatchToCss(def) + ";";
+            } else if (bgcolor && bgcolor !== 'none') {
+                bgcolor = hexToRgb(bgcolor);
+                if (bgcolor) {
+                    rule += "background-color: rgba(" + bgcolor.r + ","
+                        + bgcolor.g + "," + bgcolor.b + "," + alpha + ");";
+                }
+            }
         } else if (fill === "none") {
             rule += "background: none;";
+        }
+
+        // Drop shadow on shapes/frames/pictures. WebODF otherwise ignores
+        // draw:shadow entirely (only fo:text-shadow on text was handled).
+        // loext:shadow-blur (a LibreOffice extension) gives a soft shadow when
+        // present; without it ODF shadows are hard-edged (blur 0).
+        if (props.getAttributeNS(drawns, 'shadow') === 'visible') {
+            shadowColor = hexToRgb(props.getAttributeNS(drawns, 'shadow-color') || '#808080')
+                || {r: 128, g: 128, b: 128};
+            shadowAlpha = props.getAttributeNS(drawns, 'shadow-opacity');
+            shadowAlpha = isNumber(shadowAlpha) ? parseFloat(shadowAlpha) / 100 : 1;
+            rule += 'box-shadow: '
+                + (props.getAttributeNS(drawns, 'shadow-offset-x') || '0.1cm') + ' '
+                + (props.getAttributeNS(drawns, 'shadow-offset-y') || '0.1cm') + ' '
+                + (props.getAttributeNS(loextns, 'shadow-blur') || '0') + ' '
+                + 'rgba(' + shadowColor.r + ',' + shadowColor.g + ','
+                + shadowColor.b + ',' + shadowAlpha + ');';
         }
 
         // Position the shape's text vertically inside its (fixed-height) box.
@@ -704,9 +891,24 @@ odf.Style2CSS = function Style2CSS() {
      * @return {string}
      */
     function getDrawingPageProperties(props) {
-        var rule = '';
+        var rule = '', fill, def, css, alpha;
 
         rule += applySimpleMapping(props, graphicPropertySimpleMapping);
+        fill = props.getAttributeNS(drawns, 'fill');
+        alpha = props.getAttributeNS(drawns, 'opacity');
+        alpha = isNumber(alpha) ? parseFloat(alpha) / 100 : 1;
+        if (fill === 'gradient') {
+            def = findFillDef('gradient', props.getAttributeNS(drawns, 'fill-gradient-name'));
+            css = def && gradientToCss(def, alpha);
+            if (css) {
+                rule += "background-image: " + css + ";";
+            }
+        } else if (fill === 'hatch') {
+            def = findFillDef('hatch', props.getAttributeNS(drawns, 'fill-hatch-name'));
+            if (def) {
+                rule += "background-image: " + hatchToCss(def) + ";";
+            }
+        }
         if (props.getAttributeNS(presentationns, 'background-visible') === 'true') {
             rule += "background: none;";
         }

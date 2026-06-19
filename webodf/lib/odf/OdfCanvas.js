@@ -1094,6 +1094,55 @@
      * @param {!CSSStyleSheet} stylesheet
      * @return {undefined}
      */
+    /**
+     * Translate a computed CSS gradient (as emitted by Style2CSS for a
+     * draw:fill="gradient" shape) into an SVG <defs> gradient plus a fill
+     * reference, so a custom shape can be filled with it. Returns null when the
+     * value is not a gradient we can parse. Keeping Style2CSS as the single
+     * source of gradient semantics, this only re-expresses it for SVG.
+     * @param {string} css  e.g. "linear-gradient(63deg, rgb(..) 0%, rgb(..) 100%)"
+     * @param {string} id
+     * @return {?{def: !string, ref: !string}}
+     */
+    function cssGradientToSvg(css, id) {
+        var isRadial = css.indexOf('radial-gradient') !== -1,
+            gid = id + "_grad",
+            stopRe = /(rgba?\([^)]*\)|#[0-9a-fA-F]{3,8})\s*(-?[0-9.]+)%/g,
+            stops = [],
+            angleMatch = css.match(/(-?[0-9.]+)deg/),
+            angle = angleMatch ? parseFloat(angleMatch[1]) : 180,
+            rad,
+            dx,
+            dy,
+            def,
+            m,
+            i;
+        m = stopRe.exec(css);
+        while (m) {
+            stops.push('<stop offset="' + m[2] + '%" stop-color="' + m[1] + '"/>');
+            m = stopRe.exec(css);
+        }
+        if (stops.length < 2) {
+            return null;
+        }
+        if (isRadial) {
+            def = '<radialGradient id="' + gid + '" cx="50%" cy="50%" r="50%">';
+        } else {
+            // CSS gradient angle: 0deg = "to top", growing clockwise. Convert to
+            // an axis vector in objectBoundingBox space (y grows downward).
+            rad = angle * Math.PI / 180;
+            dx = Math.sin(rad) / 2;
+            dy = -Math.cos(rad) / 2;
+            def = '<linearGradient id="' + gid + '"'
+                + ' x1="' + (0.5 - dx).toFixed(4) + '" y1="' + (0.5 - dy).toFixed(4) + '"'
+                + ' x2="' + (0.5 + dx).toFixed(4) + '" y2="' + (0.5 + dy).toFixed(4) + '">';
+        }
+        for (i = 0; i < stops.length; i += 1) {
+            def += stops[i];
+        }
+        def += isRadial ? '</radialGradient>' : '</linearGradient>';
+        return { def: '<defs>' + def + '</defs>', ref: 'url(#' + gid + ')' };
+    }
     function renderCustomShape(shape, geometry, shapeId, stylesheet) {
         var window = runtime.getWindow(),
             computed = window && window.getComputedStyle(shape, null),
@@ -1118,13 +1167,38 @@
             target,
             mirrorH,
             mirrorV,
-            mirrorTransform;
+            mirrorTransform,
+            fillImage,
+            gradient,
+            gradientDefs = "",
+            fillRef;
         if (!computed) {
             return;
         }
         fillColor = computed.backgroundColor;
         if (!fillColor || fillColor === "rgba(0, 0, 0, 0)" || fillColor === "transparent") {
             fillColor = "none";
+        }
+        // A draw:fill="gradient" shape carries its gradient as a CSS
+        // background-image (from Style2CSS). Bake it into the SVG so the shape
+        // is actually filled with the gradient rather than left unfilled.
+        fillImage = computed.backgroundImage;
+        fillRef = fillColor;
+        if (fillImage && fillImage.indexOf("repeating-linear-gradient") !== -1) {
+            // Hatch fill. A faithful per-shape SVG hatch pattern would need
+            // viewBox-unit conversion under non-uniform stretch and hatch fills
+            // are rare, so approximate the custom shape with the hatch line
+            // colour. Plain (non-custom) shapes keep the real CSS hatch pattern.
+            gradient = fillImage.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/);
+            if (gradient) {
+                fillRef = gradient[0];
+            }
+        } else if (fillImage && fillImage.indexOf("gradient") !== -1) {
+            gradient = cssGradientToSvg(fillImage, shapeId);
+            if (gradient) {
+                gradientDefs = gradient.def;
+                fillRef = gradient.ref;
+            }
         }
         strokeColor = computed.borderTopStyle === "none" ? "none" : computed.borderTopColor;
         // Approximate the stroke width in viewBox units (the SVG is stretched to
@@ -1163,7 +1237,7 @@
         vb = [vb[0], vb[1], vbW, vbH];
         for (i = 0; i < subPaths.length; i += 1) {
             sp = subPaths[i];
-            paths += '<path d="' + sp.d + '" fill="' + (sp.fill ? fillColor : "none") + '"';
+            paths += '<path d="' + sp.d + '" fill="' + (sp.fill ? fillRef : "none") + '"';
             if (sp.stroke && strokeColor !== "none") {
                 paths += ' stroke="' + strokeColor + '" stroke-width="'
                     + (strokeWidth * vb[2]).toFixed(2) + '"';
@@ -1185,7 +1259,7 @@
         }
 
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="'
-            + vb.join(" ") + '" preserveAspectRatio="none">' + paths + "</svg>";
+            + vb.join(" ") + '" preserveAspectRatio="none">' + gradientDefs + paths + "</svg>";
 
         shape.setAttributeNS(webodfhelperns, "shapeid", shapeId);
         stylesheet.insertRule('draw|custom-shape[webodfhelper|shapeid="' + shapeId + '"] {'
@@ -1644,6 +1718,8 @@
             /**@type{!HTMLStyleElement}*/
             positioncss,
             shadowContent,
+            /**@type{!number}*/
+            autofitCounter = 0,
             /**@type{!Object.<string,!Array.<!Function>>}*/
             eventHandlers = {},
             waitingForDoneTimeoutId,
@@ -1811,6 +1887,125 @@
         }
 
         /**
+         * Collect the names of graphic styles (resolving style inheritance)
+         * that request presentation text autofit, i.e. carry
+         * style:shrink-to-fit="true" or draw:fit-to-size="shrink-to-fit".
+         * @param {!odf.OdfContainer} container
+         * @return {?Object.<string,boolean>}  null when no style asks for it
+         */
+        function collectAutofitStyleNames(container) {
+            var rootElement = container.rootElement,
+                roots = [rootElement.automaticStyles, rootElement.styles],
+                directly = {},
+                parent = {},
+                names = [],
+                result = null,
+                r,
+                styles,
+                j,
+                s,
+                name,
+                gp;
+
+            /**
+             * @param {string} n
+             * @param {!number} depth
+             * @return {!boolean}
+             */
+            function inherits(n, depth) {
+                if (!n || depth > 32) {
+                    return false;
+                }
+                if (directly[n] === true) {
+                    return true;
+                }
+                return inherits(parent[n] || '', depth + 1);
+            }
+
+            for (r = 0; r < roots.length; r += 1) {
+                if (!roots[r]) {
+                    continue;
+                }
+                styles = domUtils.getElementsByTagNameNS(roots[r], stylens, 'style');
+                for (j = 0; j < styles.length; j += 1) {
+                    s = styles[j];
+                    if (s.getAttributeNS(stylens, 'family') !== 'graphic') {
+                        continue;
+                    }
+                    name = s.getAttributeNS(stylens, 'name');
+                    if (!name) {
+                        continue;
+                    }
+                    names.push(name);
+                    parent[name] = s.getAttributeNS(stylens, 'parent-style-name') || '';
+                    gp = domUtils.getElementsByTagNameNS(s, stylens, 'graphic-properties')[0];
+                    if (gp && (gp.getAttributeNS(stylens, 'shrink-to-fit') === 'true'
+                            || gp.getAttributeNS(drawns, 'fit-to-size') === 'shrink-to-fit')) {
+                        directly[name] = true;
+                    }
+                }
+            }
+            for (j = 0; j < names.length; j += 1) {
+                if (inherits(names[j], 0)) {
+                    if (!result) {
+                        result = {};
+                    }
+                    result[names[j]] = true;
+                }
+            }
+            return result;
+        }
+
+        /**
+         * Presentation text autofit ("shrink text on overflow"). WebODF gives
+         * every placeholder a fixed height, so a paragraph that is too tall just
+         * overflows its frame. For frames whose graphic style asks for
+         * shrink-to-fit, scale the text box down (CSS zoom) so it fits. Frames
+         * that already fit, and decks that never request autofit, are untouched
+         * (the ratio is measured from rendered geometry, so it is independent of
+         * the canvas zoom applied afterwards).
+         * @param {!Element} odfbody
+         * @param {!odf.OdfContainer} container
+         * @param {!CSSStyleSheet} css
+         * @return {undefined}
+         */
+        function shrinkAutofitText(odfbody, container, css) {
+            var autofit = collectAutofitStyleNames(container),
+                frames,
+                i,
+                frame,
+                textbox,
+                frameHeight,
+                textHeight,
+                scale,
+                id;
+            if (!autofit) {
+                return;
+            }
+            frames = domUtils.getElementsByTagNameNS(odfbody, drawns, 'frame');
+            for (i = 0; i < frames.length; i += 1) {
+                frame = frames[i];
+                if (autofit[frame.getAttributeNS(drawns, 'style-name')] !== true) {
+                    continue;
+                }
+                textbox = domUtils.getElementsByTagNameNS(frame, drawns, 'text-box')[0];
+                if (!textbox) {
+                    continue;
+                }
+                frameHeight = frame.getBoundingClientRect().height;
+                textHeight = textbox.getBoundingClientRect().height;
+                if (frameHeight > 0 && textHeight > frameHeight + 1) {
+                    // zoom < 1 shrinks the text; clamp so it never disappears.
+                    scale = Math.max(0.3, (frameHeight / textHeight) * 0.97);
+                    id = "autofit" + (autofitCounter += 1);
+                    textbox.setAttributeNS(webodfhelperns, 'autofitid', id);
+                    css.insertRule('draw|text-box[webodfhelper|autofitid="' + id
+                        + '"] { zoom: ' + scale + '; }', css.cssRules.length);
+                }
+            }
+        }
+
+        /**
          * A new content.xml has been loaded. Update the live document with it.
          * @param {!odf.OdfContainer} container
          * @param {!odf.ODFDocumentElement} odfnode
@@ -1883,6 +2078,9 @@
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
             zoomHelper.setZoomableElement(sizer);
+
+            // Once the slide is laid out, shrink any overflowing autofit text.
+            shrinkAutofitText(odfnode.body, container, css);
         }
 
         /**
