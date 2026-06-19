@@ -1293,10 +1293,62 @@
         def += isRadial ? '</radialGradient>' : '</linearGradient>';
         return { def: '<defs>' + def + '</defs>', ref: 'url(#' + gid + ')' };
     }
+    /**
+     * Built-in geometry for the common OOXML preset shapes whose ODF
+     * enhanced-path LibreOffice writes degenerately (a single point for an
+     * ellipse, bare movetos for a cloud, etc.) or whose formula evaluation is
+     * unreliable. Returns SVG sub-paths in a normalised 0..100 viewBox (stretched
+     * to the shape box), or null for types handled fine by the enhanced-path.
+     * Adjustment handles are ignored (OOXML defaults are used) — enough for a
+     * faithful preview. Polygons (triangle/diamond/pentagon/...) are intentionally
+     * absent: their enhanced-path renders correctly already.
+     * @param {?string} type  value of draw:type
+     * @return {?{vb: !Array.<!number>, subPaths: !Array}}
+     */
+    function buildPresetShape(type) {
+        var sub;
+        switch (type) {
+        case "ooxml-ellipse":
+            sub = [{ d: "M 0 50 A 50 50 0 1 1 100 50 A 50 50 0 1 1 0 50 Z",
+                fill: true, stroke: true }];
+            break;
+        case "ooxml-roundRect":
+            sub = [{ d: "M 16.7 0 L 83.3 0 A 16.7 16.7 0 0 1 100 16.7 L 100 83.3"
+                + " A 16.7 16.7 0 0 1 83.3 100 L 16.7 100 A 16.7 16.7 0 0 1 0 83.3"
+                + " L 0 16.7 A 16.7 16.7 0 0 1 16.7 0 Z", fill: true, stroke: true }];
+            break;
+        case "ooxml-donut":
+            // outer ring clockwise, inner circle counter-clockwise; even-odd
+            // fill leaves the centre hole transparent.
+            sub = [{ d: "M 0 50 A 50 50 0 1 1 100 50 A 50 50 0 1 1 0 50 Z"
+                + " M 25 50 A 25 25 0 1 0 75 50 A 25 25 0 1 0 25 50 Z",
+                fill: true, stroke: true, fillRule: "evenodd" }];
+            break;
+        case "ooxml-arc":
+            // OOXML default arc: a quarter ellipse (top to right), open (no fill).
+            sub = [{ d: "M 50 0 A 50 50 0 0 1 100 50", fill: false, stroke: true }];
+            break;
+        case "ooxml-leftRightArrow":
+            sub = [{ d: "M 0 50 L 25 15 L 25 32 L 75 32 L 75 15 L 100 50"
+                + " L 75 85 L 75 68 L 25 68 L 25 85 Z", fill: true, stroke: true }];
+            break;
+        case "ooxml-cloud":
+            // Approximate cloud: a ring of circular bumps. Adjustment-free.
+            sub = [{ d: "M 22 66 A 16 16 0 0 1 10 40 A 15 15 0 0 1 26 20"
+                + " A 18 18 0 0 1 56 12 A 16 16 0 0 1 82 22 A 15 15 0 0 1 92 46"
+                + " A 15 15 0 0 1 78 68 A 18 18 0 0 1 48 74 A 16 16 0 0 1 22 66 Z",
+                fill: true, stroke: true }];
+            break;
+        default:
+            return null;
+        }
+        return { vb: [0, 0, 100, 100], subPaths: sub };
+    }
     function renderCustomShape(shape, geometry, shapeId, stylesheet) {
         var window = runtime.getWindow(),
             computed = window && window.getComputedStyle(shape, null),
             rect = shape.getBoundingClientRect && shape.getBoundingClientRect(),
+            preset,
             ctx,
             path,
             tokens,
@@ -1321,7 +1373,10 @@
             fillImage,
             gradient,
             gradientDefs = "",
-            fillRef;
+            fillRef,
+            dropShadow,
+            shadowColorMatch,
+            shadowOffsets;
         if (!computed) {
             return;
         }
@@ -1358,63 +1413,79 @@
             strokeWidth = (parseFloat(computed.borderTopWidth) || 1) / rect.width;
         }
 
-        ctx = createShapeContext(geometry);
-        vb = ctx.viewBox;
-        vbW = vb[2];
-        vbH = vb[3];
-        path = geometry.getAttributeNS(drawns, "enhanced-path") || "";
-        // When the shape's box is not as square as its viewBox, keep the corners
-        // around the stretch point circular by widening (or heightening) the
-        // viewBox and remapping the path points instead of scaling uniformly.
-        if (rect && rect.width > 0 && rect.height > 0) {
-            realAspect = rect.width / rect.height;
-            viewBoxAspect = vbW / vbH;
-            tokens = path.match(/[A-Za-z]|\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|-?[0-9]*\.?[0-9]+/g) || [];
-            if (!isNaN(ctx.stretchX) && realAspect > viewBoxAspect * 1.02) {
-                target = vbH * realAspect;
-                mappedPts = stretchedPoints(tokens, ctx, ctx.stretchX, vbW, target, true);
-                if (mappedPts) { vbW = target; }
-            } else if (!isNaN(ctx.stretchY) && realAspect < viewBoxAspect / 1.02) {
-                target = vbW / realAspect;
-                mappedPts = stretchedPoints(tokens, ctx, ctx.stretchY, vbH, target, false);
-                if (mappedPts) { vbH = target; }
-            }
-        }
-        subPaths = parseEnhancedPath(path, ctx, mappedPts);
-        if (!subPaths.length) {
-            return;
-        }
-        // Some ooxml presets (e.g. flowChartDecision) declare svg:viewBox="0 0 0 0"
-        // and use small literal path coordinates (0..2) instead of viewBox-scale
-        // formulas. createShapeContext then falls back to the 21600 default and
-        // the path would be drawn microscopically. When the path clearly does
-        // not span that box, derive the viewBox from the path's own bounds.
-        (function () {
-            var j, k, coords, x, y,
-                minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (j = 0; j < subPaths.length; j += 1) {
-                coords = subPaths[j].d.match(/-?[0-9]*\.?[0-9]+/g) || [];
-                for (k = 0; k + 1 < coords.length; k += 2) {
-                    x = parseFloat(coords[k]);
-                    y = parseFloat(coords[k + 1]);
-                    if (x < minX) { minX = x; }
-                    if (x > maxX) { maxX = x; }
-                    if (y < minY) { minY = y; }
-                    if (y > maxY) { maxY = y; }
+        // Prefer built-in geometry for the OOXML presets LibreOffice exports with
+        // a degenerate enhanced-path (ellipse, roundRect, donut, cloud, arc,
+        // leftRightArrow). Otherwise drive the shape from its enhanced-path.
+        preset = buildPresetShape(geometry.getAttributeNS(drawns, "type"));
+        if (preset) {
+            vb = preset.vb;
+            vbW = vb[2];
+            vbH = vb[3];
+            subPaths = preset.subPaths;
+        } else {
+            ctx = createShapeContext(geometry);
+            vb = ctx.viewBox;
+            vbW = vb[2];
+            vbH = vb[3];
+            path = geometry.getAttributeNS(drawns, "enhanced-path") || "";
+            // When the shape's box is not as square as its viewBox, keep the
+            // corners around the stretch point circular by widening (or
+            // heightening) the viewBox and remapping the path points instead of
+            // scaling uniformly.
+            if (rect && rect.width > 0 && rect.height > 0) {
+                realAspect = rect.width / rect.height;
+                viewBoxAspect = vbW / vbH;
+                tokens = path.match(/[A-Za-z]|\?[a-zA-Z0-9]+|\$[0-9]+|[a-z]+|-?[0-9]*\.?[0-9]+/g) || [];
+                if (!isNaN(ctx.stretchX) && realAspect > viewBoxAspect * 1.02) {
+                    target = vbH * realAspect;
+                    mappedPts = stretchedPoints(tokens, ctx, ctx.stretchX, vbW, target, true);
+                    if (mappedPts) { vbW = target; }
+                } else if (!isNaN(ctx.stretchY) && realAspect < viewBoxAspect / 1.02) {
+                    target = vbW / realAspect;
+                    mappedPts = stretchedPoints(tokens, ctx, ctx.stretchY, vbH, target, false);
+                    if (mappedPts) { vbH = target; }
                 }
             }
-            if (maxX > minX && maxY > minY
-                    && (maxX - minX) < vbW / 2 && (maxY - minY) < vbH / 2) {
-                vb[0] = minX;
-                vb[1] = minY;
-                vbW = maxX - minX;
-                vbH = maxY - minY;
+            subPaths = parseEnhancedPath(path, ctx, mappedPts);
+            if (!subPaths.length) {
+                return;
             }
-        }());
-        vb = [vb[0], vb[1], vbW, vbH];
+            // Some ooxml presets (e.g. flowChartDecision) declare
+            // svg:viewBox="0 0 0 0" and use small literal path coordinates (0..2)
+            // instead of viewBox-scale formulas. createShapeContext then falls
+            // back to the 21600 default and the path would be drawn
+            // microscopically. When the path clearly does not span that box,
+            // derive the viewBox from the path's own bounds.
+            (function () {
+                var j, k, coords, x, y,
+                    minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (j = 0; j < subPaths.length; j += 1) {
+                    coords = subPaths[j].d.match(/-?[0-9]*\.?[0-9]+/g) || [];
+                    for (k = 0; k + 1 < coords.length; k += 2) {
+                        x = parseFloat(coords[k]);
+                        y = parseFloat(coords[k + 1]);
+                        if (x < minX) { minX = x; }
+                        if (x > maxX) { maxX = x; }
+                        if (y < minY) { minY = y; }
+                        if (y > maxY) { maxY = y; }
+                    }
+                }
+                if (maxX > minX && maxY > minY
+                        && (maxX - minX) < vbW / 2 && (maxY - minY) < vbH / 2) {
+                    vb[0] = minX;
+                    vb[1] = minY;
+                    vbW = maxX - minX;
+                    vbH = maxY - minY;
+                }
+            }());
+            vb = [vb[0], vb[1], vbW, vbH];
+        }
         for (i = 0; i < subPaths.length; i += 1) {
             sp = subPaths[i];
             paths += '<path d="' + sp.d + '" fill="' + (sp.fill ? fillRef : "none") + '"';
+            if (sp.fillRule) {
+                paths += ' fill-rule="' + sp.fillRule + '"';
+            }
             if (sp.stroke && strokeColor !== "none") {
                 paths += ' stroke="' + strokeColor + '" stroke-width="'
                     + (strokeWidth * vb[2]).toFixed(2) + '"';
@@ -1439,12 +1510,29 @@
             + vb.join(" ") + '" preserveAspectRatio="none">' + gradientDefs + paths + "</svg>";
 
         shape.setAttributeNS(webodfhelperns, "shapeid", shapeId);
+        // A draw:shadow maps to box-shadow in Style2CSS, but box-shadow follows
+        // the element's rectangular border-box, so for a non-rectangular shape
+        // its straight edges poke out from behind the outline. Re-express it as a
+        // filter: drop-shadow, which casts from the SVG background's alpha (the
+        // real shape outline).
+        dropShadow = "";
+        if (computed.boxShadow && computed.boxShadow !== "none") {
+            shadowColorMatch = computed.boxShadow.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/);
+            shadowOffsets = computed.boxShadow.replace(/rgba?\([^)]*\)/, "").match(/-?[0-9.]+px/g) || [];
+            if (shadowColorMatch && shadowOffsets.length >= 3) {
+                dropShadow = "filter: drop-shadow(" + shadowOffsets[0] + " "
+                    + shadowOffsets[1] + " " + shadowOffsets[2] + " "
+                    + shadowColorMatch[0] + ");";
+            }
+        }
         stylesheet.insertRule('draw|custom-shape[webodfhelper|shapeid="' + shapeId + '"] {'
             + "background-image: url(\"data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg) + "\");"
             + "background-repeat: no-repeat;"
             + "background-size: 100% 100%;"
             + "background-color: transparent;"
             + "border: none;"
+            + "box-shadow: none;"
+            + dropShadow
             + "}", stylesheet.cssRules.length);
     }
     /**
