@@ -1697,6 +1697,89 @@
                     node.getAttributeNS(tablens, "number-rows-spanned"));
             }
         }
+        /**
+         * A bare <table:table-cell> (no table:style-name) inherits its style
+         * from the row's table:default-cell-style-name, else the column's.
+         * WebODF only styles cells via their own table:style-name, so without
+         * this the cell borders/fills (which presentation tables put on the
+         * default cell style) are lost. Copy the resolved default onto the cell
+         * so the existing style rules apply.
+         * @param {!Element} table
+         * @return {undefined}
+         */
+        function applyDefaultCellStyles(table) {
+            var columnDefaults = [],
+                rowDefault,
+                styleName;
+            /**
+             * @param {!Element} parent  scans table-column descendants in order
+             * @return {undefined}
+             */
+            function collectColumns(parent) {
+                var c = parent.firstElementChild,
+                    rep,
+                    def,
+                    j;
+                while (c) {
+                    if (c.namespaceURI === tablens && c.localName === "table-column") {
+                        def = c.getAttributeNS(tablens, "default-cell-style-name");
+                        rep = parseInt(c.getAttributeNS(tablens, "number-columns-repeated"), 10) || 1;
+                        for (j = 0; j < rep; j += 1) {
+                            columnDefaults.push(def || "");
+                        }
+                    } else if (c.namespaceURI === tablens
+                            && (c.localName === "table-columns"
+                                || c.localName === "table-header-columns")) {
+                        collectColumns(c);
+                    }
+                    c = c.nextElementSibling;
+                }
+            }
+            /**
+             * @param {!Element} parent  styles cells across the row groups
+             * @return {undefined}
+             */
+            function walkRows(parent) {
+                var r = parent.firstElementChild,
+                    c,
+                    rep,
+                    idx;
+                while (r) {
+                    if (r.namespaceURI === tablens && r.localName === "table-row") {
+                        rowDefault = r.getAttributeNS(tablens, "default-cell-style-name");
+                        idx = 0;
+                        c = r.firstElementChild;
+                        while (c) {
+                            if (c.namespaceURI === tablens
+                                    && (c.localName === "table-cell"
+                                        || c.localName === "covered-table-cell")) {
+                                if (c.localName === "table-cell"
+                                        && !c.getAttributeNS(tablens, "style-name")) {
+                                    styleName = rowDefault || columnDefaults[idx];
+                                    if (styleName) {
+                                        c.setAttributeNS(tablens, "table:style-name", styleName);
+                                    }
+                                }
+                                rep = parseInt(c.getAttributeNS(tablens, "number-columns-repeated"), 10) || 1;
+                                idx += rep;
+                            }
+                            c = c.nextElementSibling;
+                        }
+                    } else if (r.namespaceURI === tablens
+                            && (r.localName === "table-rows"
+                                || r.localName === "table-header-rows")) {
+                        walkRows(r);
+                    }
+                    r = r.nextElementSibling;
+                }
+            }
+            collectColumns(table);
+            walkRows(table);
+        }
+
+        domUtils.getElementsByTagNameNS(odffragment, tablens, 'table').forEach(function (table) {
+            applyDefaultCellStyles(/**@type{!Element}*/(table));
+        });
         tableCells = domUtils.getElementsByTagNameNS(odffragment, tablens, 'table-cell');
         for (i = 0; i < tableCells.length; i += 1) {
             node = /**@type{!Element}*/(tableCells[i]);
