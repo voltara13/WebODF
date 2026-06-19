@@ -395,6 +395,247 @@
         }
         return "";
     }
+
+    /**
+     * @param {!Uint8Array} data
+     * @param {!number} offset
+     * @return {!number}
+     */
+    function readInt16LE(data, offset) {
+        var value = data[offset] | (data[offset + 1] << 8);
+        return value & 0x8000 ? value - 0x10000 : value;
+    }
+
+    /**
+     * @param {!Uint8Array} data
+     * @param {!number} offset
+     * @return {!number}
+     */
+    function readUInt16LE(data, offset) {
+        return data[offset] | (data[offset + 1] << 8);
+    }
+
+    /**
+     * @param {!Uint8Array} data
+     * @param {!number} offset
+     * @return {!number}
+     */
+    function readUInt32LE(data, offset) {
+        return (data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16)
+            | (data[offset + 3] << 24)) >>> 0;
+    }
+
+    /**
+     * @param {!Uint8Array} data
+     * @param {!number} offset
+     * @return {!string}
+     */
+    function readColorRef(data, offset) {
+        return "rgb(" + data[offset] + "," + data[offset + 1] + "," + data[offset + 2] + ")";
+    }
+
+    /**
+     * @param {!string} text
+     * @return {!string}
+     */
+    function escapeXml(text) {
+        return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    /**
+     * Convert the subset of placeable WMF used by some PowerPoint-exported ODP
+     * clipart to SVG so Chromium/WebView can display it.
+     * @param {!Uint8Array} data
+     * @return {?string}
+     */
+    function wmfToSvgUrl(data) {
+        var PLACEABLE_KEY = 0x9AC6CDD7,
+            META_EOF = 0x0000,
+            META_SETWINDOWORG = 0x020B,
+            META_SETWINDOWEXT = 0x020C,
+            META_SELECTOBJECT = 0x012D,
+            META_DELETEOBJECT = 0x01F0,
+            META_CREATEPENINDIRECT = 0x02FA,
+            META_CREATEBRUSHINDIRECT = 0x02FC,
+            META_POLYGON = 0x0324,
+            META_SETPOLYFILLMODE = 0x0106,
+            offset = 0,
+            viewLeft,
+            viewTop,
+            viewRight,
+            viewBottom,
+            viewWidth,
+            viewHeight,
+            windowOrgX,
+            windowOrgY,
+            windowExtX,
+            windowExtY,
+            svgWidth,
+            svgHeight,
+            objects = [],
+            pen = {stroke: "none", width: 0},
+            brush = {fill: "none"},
+            fillRule = "evenodd",
+            body = "",
+            recordSize,
+            fn,
+            params,
+            i,
+            count,
+            points,
+            style,
+            color,
+            width,
+            objectIndex;
+
+        function addObject(o) {
+            var i;
+            for (i = 0; i < objects.length; i += 1) {
+                if (!objects[i]) {
+                    objects[i] = o;
+                    return;
+                }
+            }
+            objects.push(o);
+        }
+
+        /**
+         * @param {!number} value
+         * @return {!string}
+         */
+        function fmt(value) {
+            return String(Math.round(value * 100) / 100);
+        }
+
+        /**
+         * @param {!number} x
+         * @return {!number}
+         */
+        function mapX(x) {
+            return (x - windowOrgX) * svgWidth / windowExtX;
+        }
+
+        /**
+         * @param {!number} y
+         * @return {!number}
+         */
+        function mapY(y) {
+            return (y - windowOrgY) * svgHeight / windowExtY;
+        }
+
+        if (data.length < 40 || readUInt32LE(data, 0) !== PLACEABLE_KEY) {
+            return null;
+        }
+        viewLeft = readInt16LE(data, 6);
+        viewTop = readInt16LE(data, 8);
+        viewRight = readInt16LE(data, 10);
+        viewBottom = readInt16LE(data, 12);
+        viewWidth = Math.max(1, viewRight - viewLeft);
+        viewHeight = Math.max(1, viewBottom - viewTop);
+        windowOrgX = viewLeft;
+        windowOrgY = viewTop;
+        windowExtX = viewWidth;
+        windowExtY = viewHeight;
+        svgWidth = viewWidth;
+        svgHeight = viewHeight;
+        offset = 22 + 18;
+        while (offset + 6 <= data.length) {
+            recordSize = readUInt32LE(data, offset);
+            fn = readUInt16LE(data, offset + 4);
+            params = offset + 6;
+            if (recordSize < 3 || offset + recordSize * 2 > data.length) {
+                return null;
+            }
+            if (fn === META_EOF) {
+                break;
+            }
+            if (fn === META_CREATEBRUSHINDIRECT) {
+                style = readUInt16LE(data, params);
+                color = readColorRef(data, params + 2);
+                addObject({type: "brush", fill: style === 0 ? color : "none"});
+            } else if (fn === META_CREATEPENINDIRECT) {
+                style = readUInt16LE(data, params);
+                width = Math.abs(readInt16LE(data, params + 2));
+                color = readColorRef(data, params + 6);
+                addObject({type: "pen", stroke: style === 5 ? "none" : color, width: Math.max(1, width)});
+            } else if (fn === META_SELECTOBJECT) {
+                objectIndex = readUInt16LE(data, params);
+                if (objects[objectIndex]) {
+                    if (objects[objectIndex].type === "pen") {
+                        pen = objects[objectIndex];
+                    } else if (objects[objectIndex].type === "brush") {
+                        brush = objects[objectIndex];
+                    }
+                }
+            } else if (fn === META_DELETEOBJECT) {
+                objects[readUInt16LE(data, params)] = null;
+            } else if (fn === META_SETPOLYFILLMODE) {
+                fillRule = readUInt16LE(data, params) === 2 ? "nonzero" : "evenodd";
+            } else if (fn === META_SETWINDOWORG) {
+                windowOrgY = readInt16LE(data, params);
+                windowOrgX = readInt16LE(data, params + 2);
+            } else if (fn === META_SETWINDOWEXT) {
+                windowExtY = readInt16LE(data, params);
+                windowExtX = readInt16LE(data, params + 2);
+                if (windowExtX === 0 || windowExtY === 0) {
+                    return null;
+                }
+                svgWidth = Math.abs(windowExtX);
+                svgHeight = Math.abs(windowExtY);
+            } else if (fn === META_POLYGON) {
+                count = readUInt16LE(data, params);
+                if (params + 2 + count * 4 > offset + recordSize * 2) {
+                    return null;
+                }
+                points = [];
+                for (i = 0; i < count; i += 1) {
+                    points.push(fmt(mapX(readInt16LE(data, params + 2 + i * 4))) + ","
+                        + fmt(mapY(readInt16LE(data, params + 4 + i * 4))));
+                }
+                body += '<polygon points="' + points.join(" ") + '" fill="' + escapeXml(brush.fill)
+                    + '" stroke="' + escapeXml(pen.stroke) + '" stroke-width="' + pen.width
+                    + '" fill-rule="' + fillRule + '" stroke-linejoin="round"/>';
+            }
+            offset += recordSize * 2;
+        }
+        if (!body) {
+            return null;
+        }
+        return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + svgWidth
+            + " " + svgHeight + '">' + body + "</svg>");
+    }
+
+    /**
+     * @param {!string} url
+     * @return {?string}
+     */
+    function wmfDataUrlToSvgUrl(url) {
+        var base64Index = url.indexOf("base64,"),
+            binary,
+            data,
+            i;
+        if (base64Index < 0 || typeof atob !== "function") {
+            return null;
+        }
+        binary = atob(url.substring(base64Index + 7));
+        data = new Uint8Array(binary.length);
+        for (i = 0; i < binary.length; i += 1) {
+            data[i] = binary.charCodeAt(i) & 0xff;
+        }
+        return wmfToSvgUrl(data);
+    }
+
+    /**
+     * @param {!string} url
+     * @return {!string}
+     */
+    function cssUrl(url) {
+        return 'url("' + url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+            .replace(/\r/g, "").replace(/\n/g, "") + '")';
+    }
+
     /**
      * @param {string} id
      * @param {!odf.OdfContainer} container
@@ -413,16 +654,26 @@
         function callback(url) {
             var rule;
             if (url) { // if part cannot be loaded, url is null
-                rule = "background-image: url(" + url + ");";
+                rule = "background-image: " + cssUrl(url) + ";";
                 rule = 'draw|image[webodfhelper|styleid="' + id + '"] {' + rule + '}';
-                stylesheet.insertRule(rule, stylesheet.cssRules.length);
+                try {
+                    stylesheet.insertRule(rule, stylesheet.cssRules.length);
+                } catch (/**@type{*}*/e) {
+                    runtime.log('image css problem: ' + String(e));
+                }
             }
         }
         /**
          * @param {!odf.OdfPart} p
          */
         function onchange(p) {
-            callback(p.url);
+            var convertedUrl = null;
+            try {
+                convertedUrl = /\.wmf$/i.test(p.name) && p.url ? wmfDataUrlToSvgUrl(p.url) : null;
+            } catch (/**@type{*}*/e) {
+                runtime.log('wmf conversion problem: ' + String(e));
+            }
+            callback(convertedUrl || p.url);
         }
         // look for a office:binary-data
         if (url) {
@@ -510,6 +761,74 @@
             }
         }
         return null;
+    }
+
+    /**
+     * @param {!Element} rootElement
+     * @param {?string} styleName
+     * @param {!string} propertyName
+     * @return {?string}
+     */
+    function findDrawingPagePresentationProperty(rootElement, styleName, propertyName) {
+        var style = findDrawingPageStyle(rootElement, styleName),
+            props,
+            value;
+        while (style) {
+            props = domUtils.getDirectChild(style, stylens, "drawing-page-properties");
+            if (props) {
+                value = props.getAttributeNS(presentationns, propertyName);
+                if (value) {
+                    return value;
+                }
+            }
+            style = findDrawingPageStyle(rootElement,
+                style.getAttributeNS(stylens, "parent-style-name"));
+        }
+        return null;
+    }
+
+    /**
+     * @param {!Element} rootElement
+     * @param {!Element} pageElement
+     * @param {!Element} masterPageElement
+     * @param {!Element} element
+     * @return {!boolean}
+     */
+    function shouldCloneMasterPageElement(rootElement, pageElement, masterPageElement, element) {
+        var presentationClass = element.getAttributeNS(presentationns, "class"),
+            displayProperty,
+            pageValue,
+            masterValue,
+            pageStyleName,
+            masterStyleName;
+        if (element.getAttributeNS(presentationns, "placeholder") === "true") {
+            return false;
+        }
+        if (!presentationClass) {
+            return true;
+        }
+        if (presentationClass === "page-number") {
+            displayProperty = "display-page-number";
+        } else if (presentationClass === "date-time") {
+            displayProperty = "display-date-time";
+        } else if (presentationClass === "header") {
+            displayProperty = "display-header";
+        } else if (presentationClass === "footer") {
+            displayProperty = "display-footer";
+        } else {
+            return true;
+        }
+        pageStyleName = pageElement.getAttributeNS(drawns, "style-name");
+        pageValue = findDrawingPagePresentationProperty(rootElement, pageStyleName, displayProperty);
+        if (pageValue === "false") {
+            return false;
+        }
+        if (pageValue === "true") {
+            return true;
+        }
+        masterStyleName = masterPageElement.getAttributeNS(drawns, "style-name");
+        masterValue = findDrawingPagePresentationProperty(rootElement, masterStyleName, displayProperty);
+        return masterValue !== "false";
     }
     /**
      * Resolve one attribute from a graphic style, following parent-style-name.
@@ -817,6 +1136,37 @@
             master = master.nextElementSibling;
         }
     }
+
+    /**
+     * @param {!odf.OdfContainer} container
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function loadHiddenDrawLayers(container, stylesheet) {
+        var rootElement = /**@type{!Element}*/(container.rootElement),
+            roots = [rootElement.styles, rootElement.automaticStyles, rootElement.masterStyles],
+            i,
+            layers,
+            j,
+            layerName;
+        for (i = 0; i < roots.length; i += 1) {
+            if (!roots[i]) {
+                continue;
+            }
+            layers = domUtils.getElementsByTagNameNS(roots[i], drawns, "layer");
+            for (j = 0; j < layers.length; j += 1) {
+                if (layers[j].getAttributeNS(drawns, "display") === "none") {
+                    layerName = layers[j].getAttributeNS(drawns, "name");
+                    if (layerName) {
+                        stylesheet.insertRule('[draw|layer="' + layerName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+                            + '"] {display: none !important; visibility: hidden !important;}',
+                            stylesheet.cssRules.length);
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Build an evaluation context for the formulas (draw:equation) and modifiers
      * (draw:modifiers) of a draw:enhanced-geometry, exposing a resolver for the
@@ -2308,6 +2658,53 @@
     }
 
     /**
+     * PowerPoint-exported ODP can contain empty list items that are not shown by
+     * PowerPoint, but WebODF's list CSS still paints their label.
+     * @param {!Element} odffragment
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function hideEmptyListItems(odffragment, stylesheet) {
+        var listItems = domUtils.getElementsByTagNameNS(odffragment, textns, "list-item"),
+            i,
+            item,
+            child,
+            hasNestedList,
+            hasText,
+            firstNonListChild;
+
+        for (i = 0; i < listItems.length; i += 1) {
+            item = /**@type{!Element}*/(listItems[i]);
+            hasNestedList = false;
+            hasText = false;
+            firstNonListChild = null;
+            child = item.firstElementChild;
+            while (child) {
+                if (child.namespaceURI === textns && child.localName === "list") {
+                    hasNestedList = true;
+                } else {
+                    if (!firstNonListChild) {
+                        firstNonListChild = child;
+                    }
+                    if (child.textContent.replace(/\s/g, "")) {
+                        hasText = true;
+                    }
+                }
+                child = child.nextElementSibling;
+            }
+            if (!hasText && !hasNestedList) {
+                item.setAttributeNS(webodfhelperns, "emptylistitem", "true");
+            } else if (!hasText && firstNonListChild) {
+                firstNonListChild.setAttributeNS(webodfhelperns, "emptylistlabel", "true");
+            }
+        }
+        stylesheet.insertRule('text|list-item[webodfhelper|emptylistitem="true"] {display: none !important;}',
+            stylesheet.cssRules.length);
+        stylesheet.insertRule('text|list-item > [webodfhelper|emptylistlabel="true"]:first-child:before '
+            + '{content: none !important;}', stylesheet.cssRules.length);
+    }
+
+    /**
      * Expand ODF spaces of the form <text:s text:c=N/> to N consecutive
      * <text:s/> elements. This makes things simpler for WebODF during
      * handling of spaces, in particular during editing.
@@ -2436,7 +2833,8 @@
                 elementToClone = masterPageElement.firstElementChild;
                 i = 0;
                 while (elementToClone) {
-                    if (elementToClone.getAttributeNS(presentationns, 'placeholder') !== 'true') {
+                    if (shouldCloneMasterPageElement(odfContainer.rootElement, /**@type{!Element}*/(element), masterPageElement,
+                            /**@type{!Element}*/(elementToClone))) {
                         clonedElement = /**@type{!Element}*/(elementToClone.cloneNode(true));
                         clonedPageElement.appendChild(clonedElement);
                     }
@@ -3101,6 +3499,7 @@
             cloneMasterPages(formatting, container, shadowContent, odfnode.body, css);
             modifyTables(odfnode.body, element.namespaceURI);
             modifyLineBreakElements(odfnode.body);
+            hideEmptyListItems(odfnode.body, css);
             expandSpaceElements(odfnode.body);
             expandTabElements(odfnode.body);
             loadImages(container, odfnode.body, css);
@@ -3117,6 +3516,7 @@
             // positioned clone slightly off the in-flow slide.
             css.insertRule('draw|page {background-color: transparent; border: 0;}',
                 css.cssRules.length);
+            loadHiddenDrawLayers(container, css);
             loadPageBackgrounds(container, odfnode.body, css);
             loadMasterPageBackgrounds(container, css);
             loadCustomShapes(odfnode.body, css);
