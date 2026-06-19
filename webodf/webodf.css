@@ -81,6 +81,11 @@ office|text {
   text-align: left;
   overflow: visible;
   word-wrap: break-word;
+  /* Establish a stacking context so a frame sent to the background
+     (style:run-through="background", given z-index:-1) is layered behind the
+     body text but still in front of the page's own background, instead of
+     dropping behind the whole page and vanishing. */
+  isolation: isolate;
 }
 
 office|text::selection {
@@ -100,7 +105,10 @@ office|text::selection {
 office|text * draw|text-box {
 /** only for text documents */
     display: block;
-    border: 1px solid #d3d3d3;
+    /* No decorative outline: in a read-only preview the editor's text-box
+       boundary box is just noise (real frame borders come from the frame's
+       own fo:border via its graphic style, on the draw:frame element). */
+    border: none;
 }
 office|text draw|frame {
   /** make sure frames are above the main text. */
@@ -148,6 +156,12 @@ office|spreadsheet text|p {
 }
 office|spreadsheet table|table {
   margin: 3px;
+  /* Honour the sheet's declared column widths (style:column-width, mapped onto
+     the table-column elements). With the default auto layout the engine ignores
+     them and squeezes wide text columns to a sliver — worse with break-all,
+     which lets a column collapse to a single glyph. Fixed layout makes the
+     column widths authoritative and text wraps within them. */
+  table-layout: fixed;
 }
 office|spreadsheet table|table:after {
   /* show sheet name the end of the sheet */
@@ -187,7 +201,11 @@ table|table-column {
 table|table-cell {
   width: 0.889in;
   display: table-cell;
-  word-break: break-all; /* prevent long words from extending out the table cell */
+  /* Wrap at word boundaries, not mid-glyph; only break a single
+     over-long token (e.g. a URL) as a last resort. break-all wrapped
+     ordinary prose character-by-character ("Time-sav\ning to\nols"). */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 draw|frame {
   display: block;

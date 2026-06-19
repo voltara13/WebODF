@@ -884,6 +884,16 @@ odf.Style2CSS = function Style2CSS() {
             rule += 'display: flex; flex-direction: column; justify-content: ' + justify + ';';
         }
 
+        // A frame sent to the background (style:run-through="background", used
+        // e.g. for a page-sized backdrop image) sits behind the body text in
+        // ODF. WebODF otherwise paints frames in document order, so such a frame
+        // declared last in the markup covers all the text positioned before it.
+        // A negative z-index drops it below the (positioned) text frames while
+        // keeping it above the page's own background.
+        if (props.getAttributeNS(stylens, 'run-through') === 'background') {
+            rule += 'z-index: -1;';
+        }
+
         return rule;
     }
    /**
