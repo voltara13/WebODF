@@ -512,6 +512,61 @@
         return null;
     }
     /**
+     * Resolve one attribute from a graphic style, following parent-style-name.
+     * @param {!Element} rootElement
+     * @param {?string} styleName
+     * @param {string} ns
+     * @param {string} attr
+     * @return {?string}
+     */
+    function resolveGraphicProperty(rootElement, styleName, ns, attr) {
+        var name = styleName,
+            depth = 0,
+            style,
+            gp,
+            value;
+        while (name && depth < 16) {
+            style = findGraphicStyle(rootElement, name);
+            if (!style) {
+                return null;
+            }
+            gp = domUtils.getElementsByTagNameNS(style, stylens, "graphic-properties")[0];
+            if (gp) {
+                value = gp.getAttributeNS(ns, attr);
+                if (value) {
+                    return value;
+                }
+            }
+            name = style.getAttributeNS(stylens, "parent-style-name");
+            depth += 1;
+        }
+        return null;
+    }
+    /**
+     * Find a draw:marker definition by name.
+     * @param {!Element} rootElement
+     * @param {?string} name
+     * @return {?Element}
+     */
+    function findDrawMarker(rootElement, name) {
+        var roots = [rootElement.automaticStyles, rootElement.styles],
+            i,
+            markers,
+            j;
+        if (!name) {
+            return null;
+        }
+        for (i = 0; i < roots.length; i += 1) {
+            markers = roots[i] ? domUtils.getElementsByTagNameNS(roots[i], drawns, "marker") : [];
+            for (j = 0; j < markers.length; j += 1) {
+                if (markers[j].getAttributeNS(drawns, "name") === name) {
+                    return /**@type{!Element}*/(markers[j]);
+                }
+            }
+        }
+        return null;
+    }
+    /**
      * Resolve the effective fo:clip of a graphic style (following
      * parent-style-name). fo:clip is otherwise dropped, so cropped images
      * (a common case for "fill frame" pictures) render uncropped.
@@ -1306,8 +1361,8 @@
      * @param {?string} type  value of draw:type
      * @return {?{vb: !Array.<!number>, subPaths: !Array}}
      */
-    function buildPresetShape(type) {
-        var sub;
+    function buildPresetShape(type, rect) {
+        var sub, aspect, headX, bodyTop, bodyBottom;
         switch (type) {
         case "ooxml-ellipse":
             sub = [{ d: "M 0 50 A 50 50 0 1 1 100 50 A 50 50 0 1 1 0 50 Z",
@@ -1330,8 +1385,15 @@
             sub = [{ d: "M 50 0 A 50 50 0 0 1 100 50", fill: false, stroke: true }];
             break;
         case "ooxml-leftRightArrow":
-            sub = [{ d: "M 0 50 L 25 15 L 25 32 L 75 32 L 75 15 L 100 50"
-                + " L 75 85 L 75 68 L 25 68 L 25 85 Z", fill: true, stroke: true }];
+            aspect = rect && rect.height > 0 ? rect.width / rect.height : 1;
+            headX = aspect > 0 ? Math.max(12, Math.min(35, 50 / aspect)) : 25;
+            bodyTop = 25;
+            bodyBottom = 75;
+            sub = [{ d: "M 0 50 L " + headX + " 0 L " + headX + " " + bodyTop
+                + " L " + (100 - headX) + " " + bodyTop + " L " + (100 - headX)
+                + " 0 L 100 50 L " + (100 - headX) + " 100 L " + (100 - headX)
+                + " " + bodyBottom + " L " + headX + " " + bodyBottom
+                + " L " + headX + " 100 Z", fill: true, stroke: true }];
             break;
         case "ooxml-cloud":
             // Approximate cloud: a ring of circular bumps. Adjustment-free.
@@ -1417,7 +1479,7 @@
         // Prefer built-in geometry for the OOXML presets LibreOffice exports with
         // a degenerate enhanced-path (ellipse, roundRect, donut, cloud, arc,
         // leftRightArrow). Otherwise drive the shape from its enhanced-path.
-        preset = buildPresetShape(geometry.getAttributeNS(drawns, "type"));
+        preset = buildPresetShape(geometry.getAttributeNS(drawns, "type"), rect);
         if (preset) {
             vb = preset.vb;
             vbW = vb[2];
@@ -1609,7 +1671,7 @@
     /**
      * Parse a chart sub-document into a simple model.
      * @param {!Document} doc
-     * @return {?{type:!string,title:!string,categories:!Array.<!string>,
+     * @return {?{type:!string,title:!string,hasLegend:!boolean,categories:!Array.<!string>,
      *            series:!Array.<!{label:!string,color:!string,
      *            values:!Array.<!number>,pointColors:!Array.<!string>}>}}
      */
@@ -1697,6 +1759,7 @@
             });
         }
         return { type: cls, title: titleEl ? (titleEl.textContent || "").trim() : "",
+            hasLegend: domUtils.getElementsByTagNameNS(chart, chartns, "legend").length > 0,
             categories: categories, series: series };
     }
 
@@ -1705,13 +1768,48 @@
      * @param {!number} maxVal
      * @return {!{max:!number,step:!number}}
      */
-    function niceAxis(maxVal) {
-        var target = (maxVal <= 0 ? 1 : maxVal) * 1.05,
+    function niceAxis(maxVal, preferExactMax) {
+        var exact,
+            target = (maxVal <= 0 ? 1 : maxVal) * (preferExactMax ? 1 : 1.05),
             rough = target / 5,
             pow = Math.pow(10, Math.floor(Math.log(rough) / Math.LN10)),
             n = rough / pow,
             step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * pow;
+        if (preferExactMax) {
+            exact = exactAxis(maxVal);
+            if (exact) {
+                return exact;
+            }
+        }
         return { max: Math.ceil(target / step) * step, step: step };
+    }
+    /**
+     * Prefer the data maximum when it already falls on a readable axis step.
+     * @param {!number} maxVal
+     * @return {?{max:!number,step:!number}}
+     */
+    function exactAxis(maxVal) {
+        var steps = [1, 2, 2.5, 4, 5, 10],
+            pow = Math.pow(10, Math.floor(Math.log(maxVal) / Math.LN10)),
+            scales = [pow / 10, pow, pow * 10],
+            i,
+            j,
+            step,
+            intervals;
+        if (maxVal <= 0) {
+            return null;
+        }
+        for (i = 0; i < scales.length; i += 1) {
+            for (j = 0; j < steps.length; j += 1) {
+                step = steps[j] * scales[i];
+                intervals = maxVal / step;
+                if (intervals >= 3 && intervals <= 6
+                        && Math.abs(intervals - Math.round(intervals)) < 1e-9) {
+                    return { max: maxVal, step: step };
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -1768,14 +1866,16 @@
                     total = 0, k, ang0 = -Math.PI / 2, ang1, frac,
                     cx, cy, r, rIn, mid, lx, ly, x0, y0, x1, y1, large, col;
                 for (k = 0; k < vals.length; k += 1) { total += vals[k]; }
-                drawLegend((function () {
-                    var it = [], m;
-                    for (m = 0; m < c.categories.length; m += 1) {
-                        it.push({ label: c.categories[m],
-                            color: pcols[m] || chartPalette[m % chartPalette.length] });
-                    }
-                    return it;
-                }()), 30);
+                if (c.hasLegend) {
+                    drawLegend((function () {
+                        var it = [], m;
+                        for (m = 0; m < c.categories.length; m += 1) {
+                            it.push({ label: c.categories[m],
+                                color: pcols[m] || chartPalette[m % chartPalette.length] });
+                        }
+                        return it;
+                    }()), 30);
+                }
                 r = Math.min((W - legendW - 20) / 2, (H - 36) / 2) - 4;
                 cx = (W - legendW) / 2;
                 cy = 28 + (H - 28) / 2;
@@ -1821,9 +1921,11 @@
                     }
                     legendItems.push({ label: c.series[s].label, color: c.series[s].color });
                 }
-                drawLegend(legendItems, mt + 4);
+                if (c.hasLegend) {
+                    drawLegend(legendItems, mt + 4);
+                }
                 mr = legendW + 6;
-                axis = niceAxis(maxVal);
+                axis = niceAxis(maxVal, c.type === "line");
                 plotW = W - ml - mr;
                 plotH = H - mt - mb;
                 x0 = ml;
@@ -1894,6 +1996,48 @@
         return m ? { v: parseFloat(m[1]), u: m[2] || "" } : { v: 0, u: "" };
     }
     /**
+     * @param {!Element} rootElement
+     * @param {?string} name
+     * @param {!string} id
+     * @param {!string} orient
+     * @param {!number} width
+     * @param {!string} color
+     * @param {!boolean} centered
+     * @return {!string}
+     */
+    function buildLineMarker(rootElement, name, id, orient, width, color, centered) {
+        var marker = findDrawMarker(rootElement, name),
+            vbAttr,
+            vb,
+            d,
+            vbW,
+            vbH,
+            height,
+            refX,
+            refY;
+        if (!marker || !width) {
+            return "";
+        }
+        vbAttr = (marker.getAttributeNS(svgns, "viewBox") || "0 0 20 20").trim().split(/\s+/);
+        vb = [parseFloat(vbAttr[0]) || 0, parseFloat(vbAttr[1]) || 0,
+            parseFloat(vbAttr[2]) || 20, parseFloat(vbAttr[3]) || 20];
+        d = marker.getAttributeNS(svgns, "d");
+        if (!d) {
+            return "";
+        }
+        vbW = vb[2];
+        vbH = vb[3];
+        height = width * (vbH / vbW);
+        refX = centered ? vbW / 2 : vbW;
+        refY = vbH / 2;
+        return '<marker id="' + id + '" viewBox="' + vb.join(" ")
+            + '" markerUnits="userSpaceOnUse" markerWidth="' + width
+            + '" markerHeight="' + height + '" refX="' + refX + '" refY="' + refY
+            + '" orient="' + orient + '"><path d="' + svgEsc(d)
+            + '" transform="rotate(90 ' + (vb[0] + vbW / 2) + " " + (vb[1] + vbH / 2)
+            + ')" fill="' + color + '"/></marker>';
+    }
+    /**
      * Render a draw:line connector. WebODF positions frames/shapes from
      * svg:x/y/width/height, but a line carries svg:x1/y1/x2/y2 and no geometry,
      * so it is otherwise invisible. Draw it as an absolutely positioned element
@@ -1901,20 +2045,30 @@
      * uses non-scaling-stroke so it keeps its width under the box stretch.
      * @param {!Element} line
      * @param {!string} lineId
+     * @param {!Element} rootElement
      * @param {!CSSStyleSheet} stylesheet
      * @return {undefined}
      */
-    function renderLine(line, lineId, stylesheet) {
+    function renderLine(line, lineId, rootElement, stylesheet) {
         var window = runtime.getWindow(),
             computed = window && window.getComputedStyle(line, null),
             x1 = parseLength(line.getAttributeNS(svgns, "x1")),
             y1 = parseLength(line.getAttributeNS(svgns, "y1")),
             x2 = parseLength(line.getAttributeNS(svgns, "x2")),
             y2 = parseLength(line.getAttributeNS(svgns, "y2")),
+            styleName = line.getAttributeNS(drawns, "style-name"),
             unit = x1.u || "cm",
             strokeColor,
             strokeWidth,
             minThick,
+            markerStartName,
+            markerEndName,
+            markerStartWidth,
+            markerEndWidth,
+            markerStart,
+            markerEnd,
+            markerDefs = "",
+            markerAttrs = "",
             left = Math.min(x1.v, x2.v),
             top = Math.min(y1.v, y2.v),
             w = Math.abs(x2.v - x1.v),
@@ -1930,6 +2084,26 @@
             strokeColor = computed.color || "#000000";
         }
         strokeWidth = parseFloat(computed.borderTopWidth) || 1;
+        markerStartName = resolveGraphicProperty(rootElement, styleName, drawns, "marker-start");
+        markerEndName = resolveGraphicProperty(rootElement, styleName, drawns, "marker-end");
+        markerStartWidth = parseLength(resolveGraphicProperty(rootElement, styleName,
+            drawns, "marker-start-width"));
+        markerEndWidth = parseLength(resolveGraphicProperty(rootElement, styleName,
+            drawns, "marker-end-width"));
+        markerStart = buildLineMarker(rootElement, markerStartName, lineId + "start",
+            "auto-start-reverse", markerStartWidth.v, strokeColor,
+            resolveGraphicProperty(rootElement, styleName, drawns, "marker-start-center") === "true");
+        markerEnd = buildLineMarker(rootElement, markerEndName, lineId + "end",
+            "auto", markerEndWidth.v, strokeColor,
+            resolveGraphicProperty(rootElement, styleName, drawns, "marker-end-center") === "true");
+        if (markerStart) {
+            markerDefs += markerStart;
+            markerAttrs += ' marker-start="url(#' + lineId + 'start)"';
+        }
+        if (markerEnd) {
+            markerDefs += markerEnd;
+            markerAttrs += ' marker-end="url(#' + lineId + 'end)"';
+        }
         // Give a horizontal/vertical line (zero extent on one axis) enough box to
         // paint the stroke, and recentre it on the true segment.
         minThick = (strokeWidth / 37.8) * 4; // px -> cm, a few stroke widths
@@ -1942,11 +2116,12 @@
             w = minThick;
         }
         svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h
-            + '" preserveAspectRatio="none"><line'
+            + '" preserveAspectRatio="none">' + (markerDefs ? "<defs>" + markerDefs + "</defs>" : "")
+            + '<line'
             + ' x1="' + (x1.v - left) + '" y1="' + (y1.v - top) + '"'
             + ' x2="' + (x2.v - left) + '" y2="' + (y2.v - top) + '"'
             + ' stroke="' + strokeColor + '" stroke-width="' + strokeWidth
-            + '" vector-effect="non-scaling-stroke"/></svg>';
+            + '" vector-effect="non-scaling-stroke"' + markerAttrs + "/></svg>";
         line.setAttributeNS(webodfhelperns, "lineid", lineId);
         rule = 'draw|line[webodfhelper|lineid="' + lineId + '"] {'
             + 'position: absolute;'
@@ -1967,15 +2142,16 @@
     /**
      * Render all draw:line connectors.
      * @param {!Element} odfbody
+     * @param {!Element} rootElement
      * @param {!CSSStyleSheet} stylesheet
      * @return {undefined}
      */
-    function loadLines(odfbody, stylesheet) {
+    function loadLines(odfbody, rootElement, stylesheet) {
         var lines = domUtils.getElementsByTagNameNS(odfbody, drawns, "line"),
             i;
         for (i = 0; i < lines.length; i += 1) {
             try {
-                renderLine(lines[i], "line" + i, stylesheet);
+                renderLine(lines[i], "line" + i, rootElement, stylesheet);
             } catch (/**@type{*}*/e) {
                 runtime.log("could not render line: " + String(e));
             }
@@ -2803,9 +2979,16 @@
         function shrinkAutofitText(odfbody, container, css) {
             var autofit = collectAutofitStyleNames(container),
                 frames,
+                shapes,
                 i,
+                j,
                 frame,
+                shape,
                 textbox,
+                paragraphs,
+                r,
+                minTop,
+                maxBottom,
                 frameHeight,
                 textHeight,
                 scale,
@@ -2832,6 +3015,36 @@
                     textbox.setAttributeNS(webodfhelperns, 'autofitid', id);
                     css.insertRule('draw|text-box[webodfhelper|autofitid="' + id
                         + '"] { zoom: ' + scale + '; }', css.cssRules.length);
+                }
+            }
+
+            shapes = domUtils.getElementsByTagNameNS(odfbody, drawns, 'custom-shape');
+            for (i = 0; i < shapes.length; i += 1) {
+                shape = shapes[i];
+                if (autofit[shape.getAttributeNS(drawns, 'style-name')] !== true) {
+                    continue;
+                }
+                paragraphs = domUtils.getElementsByTagNameNS(shape, textns, 'p');
+                if (!paragraphs.length) {
+                    continue;
+                }
+                frameHeight = shape.getBoundingClientRect().height;
+                minTop = Infinity;
+                maxBottom = -Infinity;
+                for (j = 0; j < paragraphs.length; j += 1) {
+                    r = paragraphs[j].getBoundingClientRect();
+                    if (r.height > 0) {
+                        minTop = Math.min(minTop, r.top);
+                        maxBottom = Math.max(maxBottom, r.bottom);
+                    }
+                }
+                textHeight = maxBottom > minTop ? maxBottom - minTop : 0;
+                if (frameHeight > 0 && textHeight > frameHeight + 1) {
+                    scale = Math.max(0.3, (frameHeight / textHeight) * 0.97);
+                    id = "autofit" + (autofitCounter += 1);
+                    shape.setAttributeNS(webodfhelperns, 'autofitid', id);
+                    css.insertRule('draw|custom-shape[webodfhelper|autofitid="' + id
+                        + '"] > text|p { zoom: ' + scale + '; }', css.cssRules.length);
                 }
             }
         }
@@ -2907,7 +3120,7 @@
             loadPageBackgrounds(container, odfnode.body, css);
             loadMasterPageBackgrounds(container, css);
             loadCustomShapes(odfnode.body, css);
-            loadLines(odfnode.body, css);
+            loadLines(odfnode.body, container.rootElement, css);
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
             zoomHelper.setZoomableElement(sizer);
