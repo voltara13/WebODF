@@ -311,7 +311,40 @@
             width = frame.getAttributeNS(svgns, 'width'),
             height = frame.getAttributeNS(svgns, 'height'),
             minheight = frame.getAttributeNS(fons, 'min-height'),
-            minwidth = frame.getAttributeNS(fons, 'min-width');
+            minwidth = frame.getAttributeNS(fons, 'min-width'),
+            transform = frame.getAttributeNS(drawns, 'transform'),
+            tm,
+            angle,
+            tx,
+            ty;
+
+        // A shape positioned with draw:transform carries no svg:x/y, so it would
+        // otherwise get display:block and stack in the document flow at the left.
+        // LibreOffice writes "rotate (a) translate (x y)": the shape's local
+        // origin (top-left, pre-rotation) lands at (x, y) and is rotated about
+        // that origin. ODF rotation is counter-clockwise, so negate it for CSS.
+        if (!x && !y && transform) {
+            tm = /translate\s*\(\s*([0-9.eE+-]+[a-z%]*)\s+([0-9.eE+-]+[a-z%]*)\s*\)/.exec(transform);
+            angle = /rotate\s*\(\s*([0-9.eE+-]+)\s*\)/.exec(transform);
+            if (tm) {
+                tx = tm[1];
+                ty = tm[2];
+                rule = 'position: absolute;'
+                    + 'left: ' + tx + ';'
+                    + 'top: ' + ty + ';'
+                    + 'transform-origin: 0 0;';
+                if (angle) {
+                    rule += 'transform: rotate('
+                        + (-parseFloat(angle[1]) * 180 / Math.PI).toFixed(4) + 'deg);';
+                }
+                if (width) { rule += 'width: ' + width + ';'; }
+                if (height) { rule += 'height: ' + height + ';'; }
+                rule = 'draw|' + frame.localName + '[webodfhelper|styleid="' + styleid + '"] {'
+                    + rule + '}';
+                stylesheet.insertRule(rule, stylesheet.cssRules.length);
+                return;
+            }
+        }
 
         if (anchor === "as-char") {
             rule = 'display: inline-block;';
