@@ -452,6 +452,123 @@
         return null;
     }
     /**
+     * Find a graphic-family <style:style> by name (automatic or common styles).
+     * @param {!Element} rootElement
+     * @param {?string} name
+     * @return {?Element}
+     */
+    function findGraphicStyle(rootElement, name) {
+        var roots = [rootElement.automaticStyles, rootElement.styles],
+            i,
+            node;
+        if (!name) {
+            return null;
+        }
+        for (i = 0; i < roots.length; i += 1) {
+            node = roots[i] && roots[i].firstElementChild;
+            while (node) {
+                if (node.namespaceURI === stylens && node.localName === "style"
+                        && node.getAttributeNS(stylens, "family") === "graphic"
+                        && node.getAttributeNS(stylens, "name") === name) {
+                    return /**@type{!Element}*/(node);
+                }
+                node = node.nextElementSibling;
+            }
+        }
+        return null;
+    }
+    /**
+     * Resolve the effective fo:clip of a graphic style (following
+     * parent-style-name). fo:clip is otherwise dropped, so cropped images
+     * (a common case for "fill frame" pictures) render uncropped.
+     * @param {!Element} rootElement
+     * @param {?string} styleName
+     * @return {?string}
+     */
+    function resolveGraphicClip(rootElement, styleName) {
+        var name = styleName,
+            depth = 0,
+            style,
+            gp,
+            clip;
+        while (name && depth < 16) {
+            style = findGraphicStyle(rootElement, name);
+            if (!style) {
+                return null;
+            }
+            gp = domUtils.getElementsByTagNameNS(style, stylens, "graphic-properties")[0];
+            if (gp) {
+                clip = gp.getAttributeNS(fons, "clip");
+                if (clip) {
+                    return clip;
+                }
+            }
+            name = style.getAttributeNS(stylens, "parent-style-name");
+            depth += 1;
+        }
+        return null;
+    }
+    /**
+     * Apply an image crop (fo:clip) to a draw:image. The frame's svg:width/height
+     * is the visible (cropped) size; fo:clip gives the inset cut from each edge.
+     * Reproduce it with background-size/position so only the kept region shows.
+     * @param {!Element} image
+     * @param {!string} id
+     * @param {!odf.OdfContainer} container
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function applyImageClip(image, id, container, stylesheet) {
+        var frame = image.parentNode,
+            clip,
+            m,
+            parts,
+            top,
+            right,
+            bottom,
+            left,
+            fw,
+            fh,
+            unit,
+            rule;
+        if (!frame || frame.localName !== "frame") {
+            return;
+        }
+        clip = resolveGraphicClip(container.rootElement,
+            frame.getAttributeNS(drawns, "style-name"));
+        if (!clip) {
+            return;
+        }
+        m = /rect\(([^)]*)\)/.exec(clip);
+        if (!m) {
+            return;
+        }
+        parts = m[1].split(",");
+        if (parts.length < 4) {
+            return;
+        }
+        top = parseLength(parts[0]);
+        right = parseLength(parts[1]);
+        bottom = parseLength(parts[2]);
+        left = parseLength(parts[3]);
+        if (top.v === 0 && right.v === 0 && bottom.v === 0 && left.v === 0) {
+            return; // no actual crop
+        }
+        fw = parseLength(frame.getAttributeNS(svgns, "width"));
+        fh = parseLength(frame.getAttributeNS(svgns, "height"));
+        if (!fw.v || !fh.v) {
+            return;
+        }
+        unit = fw.u || "cm";
+        image.setAttributeNS(webodfhelperns, "clipid", id);
+        rule = 'draw|image[webodfhelper|clipid="' + id + '"] {'
+            + "background-size: " + (fw.v + left.v + right.v) + unit + " "
+                + (fh.v + top.v + bottom.v) + unit + ";"
+            + "background-position: " + (-left.v) + unit + " " + (-top.v) + unit + ";"
+            + "}";
+        stylesheet.insertRule(rule, stylesheet.cssRules.length);
+    }
+    /**
      * Load the image part and apply it as the background of every draw:page that
      * uses the given drawing-page style. Mirrors setImage: the part is loaded
      * asynchronously and the CSS rule is added once its data URL is available.
@@ -1234,6 +1351,33 @@
         if (!subPaths.length) {
             return;
         }
+        // Some ooxml presets (e.g. flowChartDecision) declare svg:viewBox="0 0 0 0"
+        // and use small literal path coordinates (0..2) instead of viewBox-scale
+        // formulas. createShapeContext then falls back to the 21600 default and
+        // the path would be drawn microscopically. When the path clearly does
+        // not span that box, derive the viewBox from the path's own bounds.
+        (function () {
+            var j, k, coords, x, y,
+                minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (j = 0; j < subPaths.length; j += 1) {
+                coords = subPaths[j].d.match(/-?[0-9]*\.?[0-9]+/g) || [];
+                for (k = 0; k + 1 < coords.length; k += 2) {
+                    x = parseFloat(coords[k]);
+                    y = parseFloat(coords[k + 1]);
+                    if (x < minX) { minX = x; }
+                    if (x > maxX) { maxX = x; }
+                    if (y < minY) { minY = y; }
+                    if (y > maxY) { maxY = y; }
+                }
+            }
+            if (maxX > minX && maxY > minY
+                    && (maxX - minX) < vbW / 2 && (maxY - minY) < vbH / 2) {
+                vb[0] = minX;
+                vb[1] = minY;
+                vbW = maxX - minX;
+                vbH = maxY - minY;
+            }
+        }());
         vb = [vb[0], vb[1], vbW, vbH];
         for (i = 0; i < subPaths.length; i += 1) {
             sp = subPaths[i];
@@ -1288,6 +1432,103 @@
                 } catch (/**@type{*}*/e) {
                     runtime.log("could not render custom shape: " + String(e));
                 }
+            }
+        }
+    }
+    /**
+     * Parse an ODF length ("7.112cm", "-3pt") into value + unit.
+     * @param {?string} value
+     * @return {!{v: !number, u: !string}}
+     */
+    function parseLength(value) {
+        var m = /^(-?[0-9.]+)([a-z%]*)$/.exec((value || "").trim());
+        return m ? { v: parseFloat(m[1]), u: m[2] || "" } : { v: 0, u: "" };
+    }
+    /**
+     * Render a draw:line connector. WebODF positions frames/shapes from
+     * svg:x/y/width/height, but a line carries svg:x1/y1/x2/y2 and no geometry,
+     * so it is otherwise invisible. Draw it as an absolutely positioned element
+     * spanning the segment's bounding box with an inline SVG line; the stroke
+     * uses non-scaling-stroke so it keeps its width under the box stretch.
+     * @param {!Element} line
+     * @param {!string} lineId
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function renderLine(line, lineId, stylesheet) {
+        var window = runtime.getWindow(),
+            computed = window && window.getComputedStyle(line, null),
+            x1 = parseLength(line.getAttributeNS(svgns, "x1")),
+            y1 = parseLength(line.getAttributeNS(svgns, "y1")),
+            x2 = parseLength(line.getAttributeNS(svgns, "x2")),
+            y2 = parseLength(line.getAttributeNS(svgns, "y2")),
+            unit = x1.u || "cm",
+            strokeColor,
+            strokeWidth,
+            minThick,
+            left = Math.min(x1.v, x2.v),
+            top = Math.min(y1.v, y2.v),
+            w = Math.abs(x2.v - x1.v),
+            h = Math.abs(y2.v - y1.v),
+            svg,
+            rule;
+        if (!computed) {
+            return;
+        }
+        strokeColor = computed.borderTopStyle === "none" ? "none" : computed.borderTopColor;
+        if (!strokeColor || strokeColor === "none") {
+            // a line with no explicit stroke still needs to be visible
+            strokeColor = computed.color || "#000000";
+        }
+        strokeWidth = parseFloat(computed.borderTopWidth) || 1;
+        // Give a horizontal/vertical line (zero extent on one axis) enough box to
+        // paint the stroke, and recentre it on the true segment.
+        minThick = (strokeWidth / 37.8) * 4; // px -> cm, a few stroke widths
+        if (h < minThick) {
+            top -= (minThick - h) / 2;
+            h = minThick;
+        }
+        if (w < minThick) {
+            left -= (minThick - w) / 2;
+            w = minThick;
+        }
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h
+            + '" preserveAspectRatio="none"><line'
+            + ' x1="' + (x1.v - left) + '" y1="' + (y1.v - top) + '"'
+            + ' x2="' + (x2.v - left) + '" y2="' + (y2.v - top) + '"'
+            + ' stroke="' + strokeColor + '" stroke-width="' + strokeWidth
+            + '" vector-effect="non-scaling-stroke"/></svg>';
+        line.setAttributeNS(webodfhelperns, "lineid", lineId);
+        rule = 'draw|line[webodfhelper|lineid="' + lineId + '"] {'
+            + 'position: absolute;'
+            + 'left: ' + left + unit + ';'
+            + 'top: ' + top + unit + ';'
+            + 'width: ' + w + unit + ';'
+            + 'height: ' + h + unit + ';'
+            + 'background-image: url("data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg) + '");'
+            + 'background-repeat: no-repeat;'
+            + 'background-size: 100% 100%;'
+            // the stroke is drawn by the SVG; suppress the CSS border that
+            // draw:stroke="solid" maps onto the element (it would show as a
+            // doubled line along the thin box edges).
+            + 'border: none;'
+            + '}';
+        stylesheet.insertRule(rule, stylesheet.cssRules.length);
+    }
+    /**
+     * Render all draw:line connectors.
+     * @param {!Element} odfbody
+     * @param {!CSSStyleSheet} stylesheet
+     * @return {undefined}
+     */
+    function loadLines(odfbody, stylesheet) {
+        var lines = domUtils.getElementsByTagNameNS(odfbody, drawns, "line"),
+            i;
+        for (i = 0; i < lines.length; i += 1) {
+            try {
+                renderLine(lines[i], "line" + i, stylesheet);
+            } catch (/**@type{*}*/e) {
+                runtime.log("could not render line: " + String(e));
             }
         }
     }
@@ -1762,6 +2003,7 @@
             for (i = 0; i < images.length; i += 1) {
                 node = /**@type{!Element}*/(images.item(i));
                 loadImage('image' + String(i), container, node, stylesheet);
+                applyImageClip(node, 'imageclip' + String(i), container, stylesheet);
             }
         }
         /**
@@ -2075,6 +2317,7 @@
             loadPageBackgrounds(container, odfnode.body, css);
             loadMasterPageBackgrounds(container, css);
             loadCustomShapes(odfnode.body, css);
+            loadLines(odfnode.body, css);
 
             sizer.insertBefore(shadowContent, sizer.firstChild);
             zoomHelper.setZoomableElement(sizer);
