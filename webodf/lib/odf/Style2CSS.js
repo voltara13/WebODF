@@ -380,6 +380,32 @@ odf.Style2CSS = function Style2CSS() {
     }
 
     /**
+     * Resolve the effective draw:fill for a graphic-properties element by
+     * walking up the parent style chain. ODF inherits style attributes
+     * independently, so a style may override draw:fill-color while inheriting
+     * the fill type (e.g. "solid") from an ancestor. Returns the nearest
+     * ancestor's draw:fill, or "" if none specifies it.
+     * @param {!Element} props graphic-properties element
+     * @return {!string}
+     */
+    function getInheritedFill(props) {
+        var parentStyle = getParentStyleNode(/**@type{!Element}*/(props.parentNode)),
+            properties,
+            fill;
+        while (parentStyle) {
+            properties = domUtils.getDirectChild(parentStyle, stylens, 'graphic-properties');
+            if (properties) {
+                fill = properties.getAttributeNS(drawns, 'fill');
+                if (fill) {
+                    return fill;
+                }
+            }
+            parentStyle = getParentStyleNode(parentStyle);
+        }
+        return '';
+    }
+
+    /**
      * Margins can be a percentage of the parent style. Resolve to
      * absolute value.
      *
@@ -847,6 +873,26 @@ odf.Style2CSS = function Style2CSS() {
             }
         } else if (fill === "none") {
             rule += "background: none;";
+        } else if (!fill && bgcolor && bgcolor !== 'none'
+                && getInheritedFill(props) === 'solid') {
+            // This style has no draw:fill of its own but does override
+            // draw:fill-color, and inherits a solid fill from an ancestor. ODF
+            // inherits style attributes independently, so the effective fill is
+            // the parent's "solid". WebODF emits one CSS rule per style and
+            // relies on the cascade for inheritance, so without this the parent
+            // rule's fill-color wins and the child's colour override is
+            // silently lost (e.g. an #ff9966 shape that inherits fill="solid"
+            // from a #00b8ff parent ended up rendered in the parent's blue).
+            // The inherited-fill check keeps shapes that override fill-color but
+            // inherit fill="none" transparent rather than painting them.
+            bgcolor = hexToRgb(bgcolor);
+            if (bgcolor) {
+                rule += "background-color: rgba("
+                    + bgcolor.r + ","
+                    + bgcolor.g + ","
+                    + bgcolor.b + ","
+                    + alpha + ");";
+            }
         }
 
         // Drop shadow on shapes/frames/pictures. WebODF otherwise ignores
