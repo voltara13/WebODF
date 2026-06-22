@@ -63,7 +63,13 @@ text|p::after, text|h::after {
   position: relative;
 }
 text|s {
-    white-space: pre;
+    /* pre-wrap (not pre) so a run of ODF spaces still wraps and, crucially,
+       spaces left at a soft-wrap boundary "hang" instead of indenting the
+       next line. With plain pre, the trailing part of e.g. <text:s c="21"/>
+       used between text and a URL pushed the wrapped URL far to the right;
+       word processors (PowerPoint/LibreOffice) hang those spaces so the URL
+       starts flush at the left of its line. */
+    white-space: pre-wrap;
 }
 text|tab {
   display: inline;
